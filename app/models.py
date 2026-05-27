@@ -154,3 +154,14 @@ class MobileReport(SQLModel, table=True):
     signature: str
     technician: str
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class LiveStatusEvent(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    asset_id: str = Field(index=True)
+    source: str
+    stage: str
+    status: str
+    progress_percent: int = 0
+    details: str = ""
+    created_at: datetime = Field(default_factory=datetime.utcnow)

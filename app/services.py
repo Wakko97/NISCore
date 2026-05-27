@@ -4,6 +4,7 @@ import hashlib
 import socket
 import os
 import ssl
+import hmac
 from datetime import datetime, timezone
 
 import httpx
@@ -76,3 +77,7 @@ def ndesk_request(method: str, path: str, payload: dict | None = None, params: d
         return response.json()
     except ValueError:
         return {"raw": response.text}
+
+
+def secure_equals(a: str, b: str) -> bool:
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
