@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException
 import os
@@ -106,8 +106,9 @@ def _create_recommendation(session, finding_type: str, details: str) -> Recommen
 def _append_audit(session, user: str, action: str, payload: str) -> None:
     last_event = session.exec(select(AuditEvent).order_by(AuditEvent.id.desc())).first()
     prev_hash = last_event.current_hash if last_event else "GENESIS"
-    current_hash = hash_chain(prev_hash, f"{action}:{payload}")
-    session.add(AuditEvent(user=user, action=action, payload=payload, prev_hash=prev_hash, current_hash=current_hash))
+    created_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    current_hash = hash_chain(prev_hash, f"{action}:{payload}", created_at)
+    session.add(AuditEvent(user=user, action=action, payload=payload, prev_hash=prev_hash, current_hash=current_hash, created_at=created_at))
 
 
 @app.post("/api/v1/clients/register")
@@ -167,9 +168,10 @@ def create_wipe_job(payload: WipeJobRequest) -> dict:
         cert = Certificate(wipe_run_id=run.id, sha256=sha, signature=signature, pdf_path=f"/certs/wipe_{run.id}.pdf")
         session.add(cert)
         _append_audit(session, "technician", "wipe_run", payload.model_dump_json())
+        wipe_run_id = run.id
         session.commit()
         session.refresh(cert)
-    return {"wipe_run_id": run.id, "certificate_id": cert.id, "sha256": cert.sha256}
+    return {"wipe_run_id": wipe_run_id, "certificate_id": cert.id, "sha256": cert.sha256}
 
 
 @app.get("/api/v1/wipe/certificates/{certificate_id}")
@@ -308,9 +310,10 @@ def create_mobile_assessment(payload: MobileAssessmentRequest) -> dict:
         report = MobileReport(mobile_assessment_id=assessment.id, pdf_path=f"/reports/mobile_{assessment.id}.pdf", sha256=sha, signature=signature, technician=payload.technician)
         session.add(report)
         _append_audit(session, payload.technician, "mobile_assessment", payload.model_dump_json())
+        assessment_id = assessment.id
         session.commit()
         session.refresh(report)
-    return {"assessment_id": assessment.id, "report_id": report.id}
+    return {"assessment_id": assessment_id, "report_id": report.id}
 
 
 @app.post("/api/v1/workshop/iso/build")
