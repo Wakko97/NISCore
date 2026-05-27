@@ -55,3 +55,20 @@ uvicorn app.main:app --reload
 ## Hinweis
 
 Die Umsetzung ist absichtlich modular gehalten, damit Worker/Scanner/Signaturdienst/Queue/PKI schrittweise produktionsreif ergänzt werden können.
+
+
+### NDesk Integration konfigurieren
+
+Für die Anbindung an **NDesk (neuland-service-desk)** müssen folgende Umgebungsvariablen gesetzt sein:
+
+```bash
+export NDESK_BASE_URL="https://<ndesk-host>"
+export NDESK_API_TOKEN="<token>"
+```
+
+Neue Endpunkte:
+- `GET /api/v1/integrations/ndesk/assets`
+- `POST /api/v1/integrations/ndesk/tickets`
+- `GET /api/v1/integrations/ndesk/users`
+- `POST /api/v1/integrations/ndesk/users`
+- `PATCH /api/v1/integrations/ndesk/users/{user_id}`
