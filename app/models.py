@@ -215,3 +215,12 @@ class OperationTicketLink(SQLModel, table=True):
     ndesk_ticket_id: str = Field(index=True)
     relation: str = "primary"
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class ModuleEvidence(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    operation_run_id: int = Field(index=True)
+    module: str = Field(index=True)
+    evidence_type: str = Field(index=True)
+    payload_json: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
