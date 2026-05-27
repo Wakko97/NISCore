@@ -6,6 +6,8 @@ import ssl
 from datetime import datetime, timezone
 
 
+def hash_chain(prev_hash: str, body: str) -> str:
+    value = f"{prev_hash}|{body}|{datetime.now(timezone.utc).isoformat()}"
 def hash_chain(prev_hash: str, body: str, created_at: datetime) -> str:
     value = f"{prev_hash}|{body}|{created_at.astimezone(timezone.utc).isoformat()}"
     return hashlib.sha256(value.encode("utf-8")).hexdigest()

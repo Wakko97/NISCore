@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException
@@ -43,6 +44,7 @@ from app.schemas import (
     WipeJobRequest,
 )
 from app.services import hash_chain, recommend_for_finding, sign_like, ssl_days_until_expiry
+from app.frontend import admin_html
 
 app = FastAPI(title="NISCore API", version="0.3.0")
 
@@ -91,9 +93,43 @@ def landing_page() -> str:
 """
 
 
+@app.get("/admin")
+def admin_dashboard():
+    return admin_html()
+
+
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/api/v1/clients")
+def list_clients() -> list[dict]:
+    with get_session() as session:
+        assets = session.exec(select(Asset).order_by(Asset.id.desc())).all()
+    return [a.model_dump() for a in assets]
+
+
+@app.get("/api/v1/recommendations")
+def list_recommendations() -> list[dict]:
+    with get_session() as session:
+        recommendations = session.exec(select(Recommendation).order_by(Recommendation.id.desc())).all()
+    return [r.model_dump() for r in recommendations]
+
+
+@app.get("/api/v1/migrations/jobs")
+def list_migration_jobs() -> list[dict]:
+    with get_session() as session:
+        jobs = session.exec(select(MigrationJob).order_by(MigrationJob.id.desc())).all()
+    return [j.model_dump() for j in jobs]
+
+
+@app.get("/api/v1/audit/events")
+def list_audit_events(limit: int = 100) -> list[dict]:
+    limit = 1 if limit < 1 else min(limit, 500)
+    with get_session() as session:
+        events = session.exec(select(AuditEvent).order_by(AuditEvent.id.desc()).limit(limit)).all()
+    return [e.model_dump() for e in events]
 
 
 def _create_recommendation(session, finding_type: str, details: str) -> Recommendation:
@@ -106,6 +142,8 @@ def _create_recommendation(session, finding_type: str, details: str) -> Recommen
 def _append_audit(session, user: str, action: str, payload: str) -> None:
     last_event = session.exec(select(AuditEvent).order_by(AuditEvent.id.desc())).first()
     prev_hash = last_event.current_hash if last_event else "GENESIS"
+    current_hash = hash_chain(prev_hash, f"{action}:{payload}")
+    session.add(AuditEvent(user=user, action=action, payload=payload, prev_hash=prev_hash, current_hash=current_hash))
     created_at = datetime.now(timezone.utc).replace(tzinfo=None)
     current_hash = hash_chain(prev_hash, f"{action}:{payload}", created_at)
     session.add(AuditEvent(user=user, action=action, payload=payload, prev_hash=prev_hash, current_hash=current_hash, created_at=created_at))
@@ -168,6 +206,9 @@ def create_wipe_job(payload: WipeJobRequest) -> dict:
         cert = Certificate(wipe_run_id=run.id, sha256=sha, signature=signature, pdf_path=f"/certs/wipe_{run.id}.pdf")
         session.add(cert)
         _append_audit(session, "technician", "wipe_run", payload.model_dump_json())
+        session.commit()
+        session.refresh(cert)
+    return {"wipe_run_id": run.id, "certificate_id": cert.id, "sha256": cert.sha256}
         wipe_run_id = run.id
         session.commit()
         session.refresh(cert)
@@ -310,6 +351,9 @@ def create_mobile_assessment(payload: MobileAssessmentRequest) -> dict:
         report = MobileReport(mobile_assessment_id=assessment.id, pdf_path=f"/reports/mobile_{assessment.id}.pdf", sha256=sha, signature=signature, technician=payload.technician)
         session.add(report)
         _append_audit(session, payload.technician, "mobile_assessment", payload.model_dump_json())
+        session.commit()
+        session.refresh(report)
+    return {"assessment_id": assessment.id, "report_id": report.id}
         assessment_id = assessment.id
         session.commit()
         session.refresh(report)

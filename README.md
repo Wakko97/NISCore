@@ -30,6 +30,10 @@ uvicorn app.main:app --reload
 
 - `GET /health`
 - `POST /api/v1/clients/register`
+- `GET /api/v1/clients`
+- `GET /api/v1/recommendations`
+- `GET /api/v1/migrations/jobs`
+- `GET /api/v1/audit/events?limit=100`
 - `PATCH /api/v1/clients/{asset_id}`
 - `POST /api/v1/diagnostics/results`
 - `POST /api/v1/wipe/jobs`
