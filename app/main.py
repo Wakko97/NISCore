@@ -61,12 +61,14 @@ from app.schemas import (
     NdeskTicketCreateRequest,
     NdeskUserRequest,
     NdeskUserUpdateRequest,
+    NdeskTicketEventRequest,
     LiveStatusEventRequest,
     StorageDetectRequest,
     StorageWipeRequest,
     LoginRequest,
     MissionRunRequest,
     AgentEnrollRequest,
+    AgentHeartbeatRequest,
     OperationModuleRunRequest,
     OperationControlRequest,
     OperationTicketLinkRequest,
@@ -79,6 +81,7 @@ from app.services import (
     recommend_for_finding,
     detect_storage_devices,
     build_device_fingerprint,
+    execute_module_logic,
     secure_equals,
     sign_like,
     ssl_days_until_expiry,
@@ -133,6 +136,15 @@ MODULE_BLUEPRINTS = {
     "pentest": {"stages": ["scope", "recon", "verify", "report"], "default_progress": 10},
     "backup": {"stages": ["snapshot", "transfer", "verify"], "default_progress": 10},
     "mobile": {"stages": ["inventory", "assessment", "recommendation"], "default_progress": 20},
+}
+MODULE_EXECUTION_PROFILES = {
+    "migration": {"required_parameters": ["source", "target"], "evidence": ["mapping_report", "delta_sync_log", "cutover_report"]},
+    "wipe": {"required_parameters": ["serial_number", "storage_type"], "evidence": ["profile_used", "command_log", "certificate_ref"]},
+    "hardware": {"required_parameters": ["collector"], "evidence": ["inventory_snapshot", "diagnostic_profile", "health_summary"]},
+    "seo": {"required_parameters": ["target_url"], "evidence": ["crawl_report", "metrics_scorecard"]},
+    "pentest": {"required_parameters": ["scope"], "evidence": ["scope_guardrail_log", "recon_summary", "validation_report"]},
+    "backup": {"required_parameters": ["policy"], "evidence": ["backup_job_log", "verify_report", "retention_status"]},
+    "mobile": {"required_parameters": ["check_profile"], "evidence": ["inventory_report", "assessment_report"]},
 }
 
 
@@ -303,9 +315,28 @@ def enroll_agent(payload: AgentEnrollRequest) -> dict:
     return {"agent_session_id": agent.id, "agent_id": agent.agent_id, "status": agent.status}
 
 
+@app.post("/api/v1/agents/{agent_id}/heartbeat", dependencies=[Depends(require_role("admin", "operator"))])
+def heartbeat_agent(agent_id: str, payload: AgentHeartbeatRequest) -> dict:
+    lease = 30 if payload.lease_seconds < 30 else min(payload.lease_seconds, 900)
+    with get_session() as session:
+        agent = session.exec(select(AgentSession).where(AgentSession.agent_id == agent_id)).first()
+        if not agent:
+            raise HTTPException(status_code=404, detail="agent session not found")
+        agent.status = payload.status
+        agent.last_seen_at = datetime.utcnow()
+        session.add(agent)
+        _append_audit(session, agent_id, "agent_heartbeat", payload.model_dump_json())
+        session.commit()
+    return {"agent_id": agent_id, "status": payload.status, "lease_seconds": lease, "next_heartbeat_until": datetime.utcnow().isoformat()}
+
+
 @app.post("/api/v1/modules/run", dependencies=[Depends(require_role("admin", "operator"))])
 def run_module(payload: OperationModuleRunRequest) -> dict:
     blueprint = MODULE_BLUEPRINTS[payload.module]
+    profile = MODULE_EXECUTION_PROFILES[payload.module]
+    missing = [key for key in profile["required_parameters"] if key not in payload.parameters]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"missing module parameters: {', '.join(missing)}")
     with get_session() as session:
         run = OperationRun(
             module=payload.module,
@@ -314,7 +345,8 @@ def run_module(payload: OperationModuleRunRequest) -> dict:
             operator=payload.operator,
             status="running",
             progress_percent=blueprint["default_progress"],
-            parameters_json=json.dumps({"stages": blueprint["stages"], **payload.parameters}),
+            parameters_json=json.dumps({"stages": blueprint["stages"], "required_parameters": profile["required_parameters"], **payload.parameters}),
+            result_json=json.dumps({"evidence_expected": profile["evidence"], "events": []}),
         )
         session.add(run)
         session.flush()
@@ -403,6 +435,40 @@ def control_module_run(run_id: int, payload: OperationControlRequest) -> dict:
     return run.model_dump()
 
 
+@app.post("/api/v1/modules/{run_id}/execute", dependencies=[Depends(require_role("admin", "operator"))])
+def execute_module_run(run_id: int, actor: str = "system") -> dict:
+    with get_session() as session:
+        run = session.get(OperationRun, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="operation run not found")
+        params = json.loads(run.parameters_json) if run.parameters_json else {}
+        execution = execute_module_logic(run.module, params)
+        run.status = "completed"
+        run.progress_percent = 100
+        run.result_json = json.dumps(
+            {
+                "executed_at": datetime.utcnow().isoformat(),
+                "module": run.module,
+                "execution": execution,
+            }
+        )
+        session.add(run)
+        session.add(
+            LiveStatusEvent(
+                asset_id=run.asset_id,
+                source=f"module:{run.module}",
+                stage="execution",
+                status="completed",
+                progress_percent=100,
+                details=execution.get("summary", "module execution completed"),
+            )
+        )
+        _append_audit(session, actor, "module_run_execute", f"run_id={run_id};module={run.module}")
+        session.commit()
+        session.refresh(run)
+    return {"run_id": run.id, "status": run.status, "progress_percent": run.progress_percent, "result": json.loads(run.result_json)}
+
+
 @app.post("/api/v1/modules/{run_id}/tickets/link", dependencies=[Depends(require_role("admin", "operator"))])
 def link_module_ticket(run_id: int, payload: OperationTicketLinkRequest) -> dict:
     with get_session() as session:
@@ -445,24 +511,37 @@ def build_offline_bundle(payload: OfflineBundleRequest) -> dict:
         bundle_dir = Path("./artifacts/offline-bundles")
         bundle_dir.mkdir(parents=True, exist_ok=True)
         out_file = bundle_dir / f"offline-run-{run.id}.json"
-        out_file.write_text(
-            json.dumps(
-                {
-                    "run_id": run.id,
-                    "module": run.module,
-                    "asset_id": run.asset_id,
-                    "profile": payload.profile,
-                    "include_tasks": payload.include_tasks,
-                    "parameters": json.loads(run.parameters_json),
-                    "generated_at": datetime.utcnow().isoformat(),
-                },
-                indent=2,
-            )
+        bundle_payload = {
+            "run_id": run.id,
+            "module": run.module,
+            "asset_id": run.asset_id,
+            "profile": payload.profile,
+            "include_tasks": payload.include_tasks,
+            "parameters": json.loads(run.parameters_json),
+            "generated_at": datetime.utcnow().isoformat(),
+        }
+        out_file.write_text(json.dumps(bundle_payload, indent=2))
+        bundle_sha, bundle_sig = sign_like(json.dumps(bundle_payload, sort_keys=True))
+        sig_file = bundle_dir / f"offline-run-{run.id}.sig"
+        sha_file = bundle_dir / f"offline-run-{run.id}.sha256"
+        sig_file.write_text(bundle_sig + "\n")
+        sha_file.write_text(bundle_sha + "\n")
+        _append_audit(
+            session,
+            payload.created_by,
+            "offline_bundle_build",
+            f"run_id={run.id};file={out_file};sha256={bundle_sha};sig={bundle_sig}",
         )
-        _append_audit(session, payload.created_by, "offline_bundle_build", f"run_id={run.id};file={out_file}")
         session.commit()
         run_id = run.id
-    return {"created": True, "run_id": run_id, "bundle_path": str(out_file)}
+    return {
+        "created": True,
+        "run_id": run_id,
+        "bundle_path": str(out_file),
+        "bundle_sha256_path": str(sha_file),
+        "bundle_signature_path": str(sig_file),
+        "bundle_sha256": bundle_sha,
+    }
 
 
 def _create_recommendation(session, finding_type: str, details: str) -> Recommendation:
@@ -1227,6 +1306,81 @@ def ndesk_list_tickets(limit: int = 100) -> dict:
         _append_audit(session, "ndesk", "ticket_sync_pull", f"count={len(tickets) if isinstance(tickets, list) else 'unknown'}")
         session.commit()
     return {"source": "ndesk", "tickets": tickets}
+
+
+@app.get("/api/v1/integrations/ndesk/tickets/sync", dependencies=[Depends(require_role("admin", "operator"))])
+def ndesk_ticket_sync(limit: int = 100, cursor: str | None = None) -> dict:
+    safe_limit = 1 if limit < 1 else min(limit, 1000)
+    params: dict[str, str | int] = {"limit": safe_limit}
+    if cursor:
+        params["cursor"] = cursor
+    try:
+        raw = ndesk_request("GET", "/api/tickets", params=params)
+    except NdeskClientError as exc:
+        raise HTTPException(status_code=502, detail=f"ndesk error: {exc}") from exc
+
+    tickets = raw if isinstance(raw, list) else raw.get("tickets", [])
+    next_cursor = raw.get("next_cursor") if isinstance(raw, dict) else None
+    linked_runs = 0
+    with get_session() as session:
+        for ticket in tickets if isinstance(tickets, list) else []:
+            ticket_id = str(ticket.get("id") or ticket.get("ticket_id") or "")
+            if not ticket_id:
+                continue
+            link = session.exec(select(OperationTicketLink).where(OperationTicketLink.ndesk_ticket_id == ticket_id)).first()
+            if not link:
+                continue
+            run = session.get(OperationRun, link.operation_run_id)
+            if not run:
+                continue
+            payload = {"ticket_id": ticket_id, "ticket_status": ticket.get("status", "unknown"), "synced_at": datetime.utcnow().isoformat()}
+            run.result_json = json.dumps({"sync": payload, "previous": run.result_json})
+            session.add(run)
+            linked_runs += 1
+        _append_audit(session, "ndesk", "ticket_sync_pull_incremental", f"count={len(tickets) if isinstance(tickets, list) else 0};cursor={cursor or '-'};linked_runs={linked_runs}")
+        session.commit()
+    return {"source": "ndesk", "tickets": tickets, "next_cursor": next_cursor, "linked_runs": linked_runs}
+
+
+@app.post("/api/v1/integrations/ndesk/tickets/events", dependencies=[Depends(require_role("admin", "operator"))])
+def ndesk_ticket_event(payload: NdeskTicketEventRequest) -> dict:
+    with get_session() as session:
+        run: OperationRun | None = None
+        if payload.run_id is not None:
+            run = session.get(OperationRun, payload.run_id)
+        if not run:
+            link = session.exec(select(OperationTicketLink).where(OperationTicketLink.ndesk_ticket_id == payload.ticket_id)).first()
+            if link:
+                run = session.get(OperationRun, link.operation_run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="no linked operation run for ticket event")
+
+        normalized = payload.status.lower()
+        status_map = {
+            "open": "running",
+            "in_progress": "running",
+            "waiting": "paused",
+            "resolved": "completed",
+            "closed": "completed",
+            "rejected": "rejected",
+            "canceled": "canceled",
+        }
+        run.status = status_map.get(normalized, run.status)
+        session.add(run)
+        session.add(
+            LiveStatusEvent(
+                asset_id=run.asset_id,
+                source="ndesk:webhook",
+                stage="ticket_sync",
+                status=run.status,
+                progress_percent=run.progress_percent,
+                details=f"ticket {payload.ticket_id} -> {payload.status}; note={payload.note}",
+            )
+        )
+        _append_audit(session, payload.actor, "ndesk_ticket_event", payload.model_dump_json())
+        session.commit()
+        session.refresh(run)
+    return {"mapped": True, "run_id": run.id, "run_status": run.status, "ticket_id": payload.ticket_id}
 
 
 @app.post("/api/v1/live/status", dependencies=[Depends(_require_live_token)])

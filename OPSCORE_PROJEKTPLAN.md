@@ -260,6 +260,85 @@ Die Lösung priorisiert:
 
 ---
 
+## 7) Umsetzungsablauf „von Orchestrierung zu produktiven Fachmodulen“ (aktueller Delivery-Plan)
+
+> Ausgangslage: API-Orchestrierung ist vorhanden (`/api/v1/modules/run`, Progress/Control/Listing), die Fach-Engines werden nun in einem priorisierten Ablauf ergänzt.
+
+### Phase A – Fundament stabilisieren (Sprint 1–2)
+
+1. **Modul-Contract pro Domäne finalisieren**
+   - Einheitliches `RunInput`/`RunOutput`-Schema je Modul (migration, wipe, hardware, seo, pentest, backup).
+   - Definition standardisierter Statusübergänge (`queued → running → paused → completed|failed|canceled`).
+   - Pro Modul ein verbindliches Evidenz-Format (Nachweise, Artefakte, Prüfsummen, Quellen).
+2. **Persistenz entkoppeln**
+   - Ablösung des `result_json`-Monoliths durch modul-spezifische Ergebnistabellen.
+   - Einführung von Retry-, Dead-letter- und Sync-Metadaten als eigene Entitäten.
+3. **Audit-Härtung**
+   - Erweiterung der Hash-Chain um fachliche Evidenz-Referenzen pro Einzelschritt.
+   - Signatur-/Vertrauensmodell für Offline-Importe festlegen (Trust Store + Signaturprüfung).
+
+### Phase B – NDesk- und Agent-Lifecycle schließen (Sprint 2–3)
+
+1. **NDesk bidirektional pro Vorgang**
+   - Inkrementeller Delta-Sync mit Cursor-Handling und Konfliktstrategie (Last-Writer/Policy-basiert).
+   - Inbound-Webhook-Receiver für Ticket-Events und Mapping auf bestehende Runs/Cases.
+   - Zustandskopplung Ticketstatus ↔ Runstatus inkl. Fehlerpfad, Retry-Regeln und Idempotenz.
+2. **Agent-Lifecycle komplettieren**
+   - Heartbeat/Lease-Protokoll mit Timeout, Grace-Period und Session-Recovery.
+   - Token-Rotation und Revocation-Liste für kompromittierte/abgelaufene Agenten.
+   - Command-Pull/Ack-Modell (at-least-once + deduplizierende Command-IDs).
+   - Versioniertes Rollout der Agent-Binaries (MSI/EXE) mit Ring-Deployment (canary → broad).
+3. **Offline-Sync-Basis**
+   - Store-and-Forward-Mechanik mit Konfliktauflösung (Server-Revision vs. Client-Revision).
+   - Reconnect-Sync in zentrale Audit-Chain mit deterministischer Reihenfolge.
+
+### Phase C – Offline-Bootstick produktionsfähig machen (Sprint 3–4)
+
+1. **Signierte Jobpakete**
+   - Bundle-Erzeugung als signiertes Offline-Manifest (Tamper-Schutz + Ablaufzeit).
+2. **Lokales Journal**
+   - Event-Journal auf Bootmedium (append-only, hashverkettet, exportierbar).
+3. **Modulspezifische Offline-Ausführung**
+   - Ausführungspipelines je Modul statt reiner Bundle-Datei.
+   - Wiederanlauf nach Unterbrechung mit Checkpointing.
+
+### Phase D – Fachliche Umsetzung je Modul (Sprint 4–8)
+
+1. **Migration (M365/OneDrive/GoogleDrive/Nextcloud/Mail)**
+   - Echte Connectoren, Mapping-Layer, Delta-Sync, Cutover-Runbooks, Verifikationsberichte.
+2. **BSI-Wipe + Zertifikate**
+   - BSI-Profilbibliothek, medientypspezifische Verfahren (HDD/SSD/NVMe), Compliance-Matrix.
+3. **Hardware-Analyse via Agent/Bootmedium**
+   - Tiefere Collector-Pipelines (Windows/Linux/Bootstick), Diagnoseprofile, Vergleichsbasis.
+4. **SEO/Webanalyse**
+   - Crawl-Engine, technische Metriken, Priorisierung und Scorecards.
+5. **Pentesting-Automation**
+   - Scope-Guardrails, automatisierte Recon-/Validierungskette, sichere Exploit-Validierung.
+6. **Backup/Restore via Agent**
+   - Backup-Jobs, Restore-Workflows, Drill-Runs, Verify-Schritte, Retention-Policies.
+
+### Phase E – UI, Betrieb und Qualitätssicherung (Sprint 6–9, überlappend)
+
+1. **Webpanel-Ausbau**
+   - Laufende Modulansichten mit Timeline/ETA, Fehlerzuständen und Operator-Aktionen.
+   - Offline-Bundle- und Sync-Status inklusive Konfliktindikatoren.
+2. **Testtiefe ausbauen**
+   - Negative RBAC-Tests, Concurrency-/Race-Condition-Szenarien, Duplicate-Guards.
+   - Integrationsfehlerbilder für NDesk (HTTP-Timeout, 4xx/5xx, partielle Responses).
+   - Migrationstest `alembic upgrade head` als verbindlicher CI-Gate.
+3. **Abnahme-Checklisten je Modul**
+   - Funktionalität, Sicherheit, Revisionsnachweis, Wiederanlauf, Support-Runbook.
+
+### Definition of Done (quer über alle Phasen)
+
+- **Technisch:** Modul kann orchestriert, pausiert, fortgesetzt, abgebrochen und nachvollziehbar auditiert werden.
+- **Betrieblich:** Monitoring, Alerting, Retry/Dead-letter und On-Call-Runbook vorhanden.
+- **Compliance:** Evidenzformat, Signaturkette und Prüfpfad für Auditoren dokumentiert.
+- **Integration:** NDesk-Status ist pro Vorgang synchron und konfliktfest.
+- **Qualität:** E2E- und Negativtests sind grün, inkl. Migrations- und Offline-Reconnect-Szenarien.
+
+---
+
 ## 7) UX-/Bedienkonzept (NF20)
 - Dashboard-Startseite als Kachel-Dashboard:
   - „Scans starten“, „Werkstatt-Läufe“, „Zertifikate“, „Warnungen“.
@@ -409,4 +488,3 @@ Pflicht-Checkliste vor Produktivkopplung:
 - Idempotenz (kein Dubletten-Ticketing bei Retries).
 - Fehlerpfade/Retry/Dead-Letter-Queue.
 - DSGVO & Löschfristen in beiden Systemen konsistent.
-
