@@ -81,3 +81,29 @@ def ndesk_request(method: str, path: str, payload: dict | None = None, params: d
 
 def secure_equals(a: str, b: str) -> bool:
     return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+
+def detect_storage_devices(asset_id: str, serial_number: str, device_type: str) -> list[dict]:
+    seed = hashlib.sha256(f"{asset_id}:{serial_number}:{device_type}".encode("utf-8")).hexdigest()
+    primary_serial = f"SN{seed[:10].upper()}"
+    secondary_serial = f"SN{seed[10:20].upper()}"
+    smart_temp = int(seed[20:22], 16) % 40 + 25
+    return [
+        {
+            "model": "Samsung PM9A3",
+            "serial_number": primary_serial,
+            "health": "ok",
+            "smart_json": f'{{"temp_c":{smart_temp},"wear_level":2,"nvme":true}}',
+        },
+        {
+            "model": "WDC Blue SA510",
+            "serial_number": secondary_serial,
+            "health": "warning" if smart_temp > 55 else "ok",
+            "smart_json": f'{{"temp_c":{smart_temp+3},"reallocated_sectors":0}}',
+        },
+    ]
+
+
+def build_device_fingerprint(asset_id: str, disk_serial: str, method: str, standard: str) -> str:
+    raw = f"{asset_id}:{disk_serial}:{method}:{standard}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
