@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import socket
+import os
 import ssl
 from datetime import datetime, timezone
+
+import httpx
 
 
 def hash_chain(prev_hash: str, body: str, created_at: datetime) -> str:
@@ -41,3 +44,35 @@ def ssl_days_until_expiry(host: str, port: int = 443) -> int:
     expires = cert["notAfter"]
     dt = datetime.strptime(expires, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
     return (dt - datetime.now(timezone.utc)).days
+
+
+class NdeskClientError(RuntimeError):
+    pass
+
+
+def _ndesk_settings() -> tuple[str, str]:
+    base_url = os.getenv("NDESK_BASE_URL", "").strip().rstrip("/")
+    token = os.getenv("NDESK_API_TOKEN", "").strip()
+    if not base_url or not token:
+        raise NdeskClientError("NDESK_BASE_URL und NDESK_API_TOKEN müssen gesetzt sein")
+    return base_url, token
+
+
+def ndesk_request(method: str, path: str, payload: dict | None = None, params: dict | None = None) -> dict:
+    base_url, token = _ndesk_settings()
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+
+    with httpx.Client(timeout=15) as client:
+        response = client.request(method, f"{base_url}{path}", json=payload, params=params, headers=headers)
+
+    if response.status_code >= 400:
+        raise NdeskClientError(f"NDesk Fehler {response.status_code}: {response.text[:300]}")
+
+    if not response.text:
+        return {"ok": True}
+    try:
+        return response.json()
+    except ValueError:
+        return {"raw": response.text}

@@ -94,3 +94,18 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 - **Auth-Hardening:** RBAC-Tests für 401/403 ergänzt und Legacy `X-API-Token` Guard entfernt.
 - **Monitoring erweitert:** `/metrics` liefert nun Request-/Queue-Zähler, `/ready` enthält Queue-Tiefe.
 - **CI erweitert:** Migration-Check via `alembic upgrade head`.
+### NDesk Integration konfigurieren
+
+Für die Anbindung an **NDesk (neuland-service-desk)** müssen folgende Umgebungsvariablen gesetzt sein:
+
+```bash
+export NDESK_BASE_URL="https://<ndesk-host>"
+export NDESK_API_TOKEN="<token>"
+```
+
+Neue Endpunkte:
+- `GET /api/v1/integrations/ndesk/assets`
+- `POST /api/v1/integrations/ndesk/tickets`
+- `GET /api/v1/integrations/ndesk/users`
+- `POST /api/v1/integrations/ndesk/users`
+- `PATCH /api/v1/integrations/ndesk/users/{user_id}`

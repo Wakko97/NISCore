@@ -44,8 +44,11 @@ from app.schemas import (
     GitHubSSHKeyRequest,
     WebhookTestRequest,
     WipeJobRequest,
+    NdeskTicketCreateRequest,
+    NdeskUserRequest,
+    NdeskUserUpdateRequest,
 )
-from app.services import hash_chain, recommend_for_finding, sign_like, ssl_days_until_expiry
+from app.services import NdeskClientError, hash_chain, ndesk_request, recommend_for_finding, sign_like, ssl_days_until_expiry
 from app.frontend import admin_html
 from app.jobs import enqueue, get_job, jobs
 from app.observability import logger, request_logging_middleware
@@ -479,3 +482,65 @@ def get_queue_job(job_id: str, ctx: AuthContext = Depends(require_role("admin", 
     if not job:
         raise HTTPException(status_code=404, detail="queue job not found")
     return job.__dict__
+@app.get("/api/v1/integrations/ndesk/assets")
+def ndesk_list_assets(limit: int = 100) -> dict:
+    safe_limit = 1 if limit < 1 else min(limit, 500)
+    try:
+        result = ndesk_request("GET", "/api/assets", params={"limit": safe_limit})
+    except NdeskClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"source": "ndesk", "assets": result}
+
+
+@app.post("/api/v1/integrations/ndesk/tickets")
+def ndesk_create_ticket(payload: NdeskTicketCreateRequest) -> dict:
+    body = payload.model_dump(exclude_none=True)
+    try:
+        created = ndesk_request("POST", "/api/tickets", payload=body)
+    except NdeskClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    with get_session() as session:
+        _append_audit(session, "ndesk", "ticket_create", payload.model_dump_json())
+        session.commit()
+    return {"source": "ndesk", "ticket": created}
+
+
+@app.get("/api/v1/integrations/ndesk/users")
+def ndesk_list_users(limit: int = 100) -> dict:
+    safe_limit = 1 if limit < 1 else min(limit, 500)
+    try:
+        users = ndesk_request("GET", "/api/users", params={"limit": safe_limit})
+    except NdeskClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"source": "ndesk", "users": users}
+
+
+@app.post("/api/v1/integrations/ndesk/users")
+def ndesk_create_user(payload: NdeskUserRequest) -> dict:
+    body = payload.model_dump(exclude_none=True)
+    try:
+        created = ndesk_request("POST", "/api/users", payload=body)
+    except NdeskClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    with get_session() as session:
+        _append_audit(session, "ndesk", "user_create", payload.model_dump_json())
+        session.commit()
+    return {"source": "ndesk", "user": created}
+
+
+@app.patch("/api/v1/integrations/ndesk/users/{user_id}")
+def ndesk_update_user(user_id: str, payload: NdeskUserUpdateRequest) -> dict:
+    updates = payload.model_dump(exclude_none=True)
+    if not updates:
+        raise HTTPException(status_code=400, detail="no updates provided")
+    try:
+        updated = ndesk_request("PATCH", f"/api/users/{user_id}", payload=updates)
+    except NdeskClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    with get_session() as session:
+        _append_audit(session, "ndesk", "user_update", f"{user_id}:{updates}")
+        session.commit()
+    return {"source": "ndesk", "user": updated}

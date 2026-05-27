@@ -102,3 +102,25 @@ class ISOBuildRequest(BaseModel):
 class GitHubSSHKeyRequest(BaseModel):
     title: str
     public_key: str
+
+
+class NdeskTicketCreateRequest(BaseModel):
+    title: str
+    description: str
+    priority: str = "normal"
+    asset_external_id: str | None = None
+    requester_email: str | None = None
+
+
+class NdeskUserRequest(BaseModel):
+    external_id: str | None = None
+    email: str
+    display_name: str
+    role: str = "user"
+    active: bool = True
+
+
+class NdeskUserUpdateRequest(BaseModel):
+    display_name: str | None = None
+    role: str | None = None
+    active: bool | None = None
