@@ -184,3 +184,34 @@ class LiveStatusEvent(SQLModel, table=True):
     progress_percent: int = 0
     details: str = ""
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class AgentSession(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    agent_id: str = Field(index=True, unique=True)
+    asset_id: str = Field(index=True)
+    platform: str
+    mode: str = "agent"
+    status: str = "online"
+    last_seen_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class OperationRun(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    module: str = Field(index=True)
+    tenant_id: str = Field(index=True, default="default")
+    asset_id: str = Field(index=True)
+    operator: str
+    status: str = "queued"
+    progress_percent: int = 0
+    parameters_json: str = "{}"
+    result_json: str = "{}"
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class OperationTicketLink(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    operation_run_id: int = Field(index=True)
+    ndesk_ticket_id: str = Field(index=True)
+    relation: str = "primary"
+    created_at: datetime = Field(default_factory=datetime.utcnow)

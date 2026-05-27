@@ -163,3 +163,92 @@ def test_flow_wipe_execution_job_reject_and_cancel():
             headers=token("operator"),
         )
         assert cancel.status_code == 200
+
+
+def test_flow_module_run_progress_and_control():
+    with TestClient(app) as c:
+        asset = aid("e2e7")
+        c.post('/api/v1/clients/register', json={"tenant_id":"default","asset_id":asset,"serial_number":"s7","device_type":"server"}, headers=token())
+        run = c.post(
+            '/api/v1/modules/run',
+            json={"module": "backup", "asset_id": asset, "tenant_id": "default", "operator": "ops1", "parameters": {"policy": "daily"}},
+            headers=token("operator"),
+        )
+        assert run.status_code == 200
+        run_id = run.json()["run_id"]
+        assert run.json()["status"] == "running"
+
+        pause = c.post(f"/api/v1/modules/{run_id}/control", json={"action": "pause", "actor": "ops1", "note": "window closed"}, headers=token("operator"))
+        assert pause.status_code == 200
+        assert pause.json()["status"] == "paused"
+
+        progress = c.post(
+            f"/api/v1/modules/{run_id}/progress",
+            json={"asset_id": asset, "source": "agent-01", "stage": "verify", "status": "completed", "progress_percent": 100, "details": "restore test ok"},
+            headers=token("operator"),
+        )
+        assert progress.status_code == 200
+        assert progress.json()["status"] == "completed"
+
+        runs = c.get("/api/v1/modules/runs?module=backup&status=completed", headers=token("viewer"))
+        assert runs.status_code == 200
+        assert any(r["id"] == run_id for r in runs.json())
+
+
+def test_flow_module_ticket_link_and_offline_bundle():
+    with TestClient(app) as c:
+        asset = aid("e2e8")
+        c.post('/api/v1/clients/register', json={"tenant_id":"default","asset_id":asset,"serial_number":"s8","device_type":"workstation"}, headers=token())
+        run = c.post(
+            '/api/v1/modules/run',
+            json={"module": "hardware", "asset_id": asset, "tenant_id": "default", "operator": "ops2", "parameters": {"deep_scan": True}},
+            headers=token("operator"),
+        )
+        assert run.status_code == 200
+        run_id = run.json()["run_id"]
+
+        link = c.post(
+            f"/api/v1/modules/{run_id}/tickets/link",
+            json={"ticket_id": "NDSK-2026-0001", "relation": "primary", "actor": "ops2"},
+            headers=token("operator"),
+        )
+        assert link.status_code == 200
+        assert link.json()["linked"] is True
+        link_again = c.post(
+            f"/api/v1/modules/{run_id}/tickets/link",
+            json={"ticket_id": "NDSK-2026-0001", "relation": "primary", "actor": "ops2"},
+            headers=token("operator"),
+        )
+        assert link_again.status_code == 200
+        assert link_again.json()["link_id"] == link.json()["link_id"]
+
+        links = c.get(f"/api/v1/modules/{run_id}/tickets", headers=token("viewer"))
+        assert links.status_code == 200
+        assert any(item["ndesk_ticket_id"] == "NDSK-2026-0001" for item in links.json())
+
+        bundle = c.post(
+            "/api/v1/modules/offline/bundle",
+            json={"run_id": run_id, "created_by": "ops2", "profile": "bootstick-offline", "include_tasks": ["hardware", "mobile"]},
+            headers=token("operator"),
+        )
+        assert bundle.status_code == 200
+        assert bundle.json()["created"] is True
+
+
+def test_flow_module_progress_asset_mismatch_guard():
+    with TestClient(app) as c:
+        asset = aid("e2e9")
+        wrong_asset = aid("e2e10")
+        c.post('/api/v1/clients/register', json={"tenant_id":"default","asset_id":asset,"serial_number":"s9","device_type":"server"}, headers=token())
+        run = c.post(
+            '/api/v1/modules/run',
+            json={"module": "migration", "asset_id": asset, "tenant_id": "default", "operator": "ops3", "parameters": {"source": "m365", "target": "nextcloud"}},
+            headers=token("operator"),
+        )
+        run_id = run.json()["run_id"]
+        progress = c.post(
+            f"/api/v1/modules/{run_id}/progress",
+            json={"asset_id": wrong_asset, "source": "agent-02", "stage": "copy", "status": "running", "progress_percent": 40, "details": "copy started"},
+            headers=token("operator"),
+        )
+        assert progress.status_code == 400

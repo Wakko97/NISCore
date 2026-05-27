@@ -195,3 +195,38 @@ class MissionRunRequest(BaseModel):
     with_wipe: bool = True
     wipe_method: str = "nvme-format"
     wipe_standard: str = "nist-800-88"
+
+
+class AgentEnrollRequest(BaseModel):
+    agent_id: str
+    asset_id: str
+    token: str
+    platform: str = "windows"
+    mode: Literal["agent", "bootstick"] = "agent"
+
+
+class OperationModuleRunRequest(BaseModel):
+    module: Literal["migration", "wipe", "hardware", "seo", "pentest", "backup", "mobile"]
+    asset_id: str
+    tenant_id: str = "default"
+    operator: str
+    parameters: dict = {}
+
+
+class OperationControlRequest(BaseModel):
+    action: Literal["pause", "resume", "cancel", "approve", "reject"]
+    actor: str
+    note: str = ""
+
+
+class OperationTicketLinkRequest(BaseModel):
+    ticket_id: str
+    relation: str = "primary"
+    actor: str
+
+
+class OfflineBundleRequest(BaseModel):
+    run_id: int
+    created_by: str
+    profile: str = "bootstick-offline"
+    include_tasks: list[str] = ["hardware", "wipe", "mobile"]
