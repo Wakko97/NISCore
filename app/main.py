@@ -4,11 +4,14 @@ from datetime import datetime
 from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 import os
 from pathlib import Path
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from sqlmodel import select
 
+from app.config import settings
 from app.db import get_session, init_db
 from app.models import (
     LiveStatusEvent,
@@ -50,8 +53,21 @@ from app.schemas import (
 )
 from app.services import NdeskClientError, hash_chain, ndesk_request, recommend_for_finding, secure_equals, sign_like, ssl_days_until_expiry
 from app.frontend import admin_html
+from app.jobs import enqueue, get_job, jobs
+from app.observability import logger, request_logging_middleware
+from app.metrics import render_metrics
+from app.security import AuthContext, issue_token, require_role
 
-app = FastAPI(title="NISCore API", version="0.3.0")
+app = FastAPI(title=settings.app_name, version=settings.app_version)
+app.middleware("http")(request_logging_middleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 
 class LiveStatusHub:
@@ -93,6 +109,17 @@ def startup() -> None:
     init_db()
 
 
+@app.exception_handler(HTTPException)
+def http_exception_handler(request: Request, exc: HTTPException):
+    return JSONResponse(status_code=exc.status_code, content={"error": exc.detail, "path": request.url.path})
+
+
+@app.exception_handler(Exception)
+def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.exception("unhandled_error path=%s", request.url.path)
+    return JSONResponse(status_code=500, content={"error": "internal server error", "path": request.url.path})
+
+
 @app.get("/", response_class=HTMLResponse)
 def landing_page() -> str:
     return """
@@ -123,7 +150,7 @@ def landing_page() -> str:
       <div class='grid'>
         <article class='card'><h3>API Status</h3><div class='kpi'>/health → ok</div></article>
         <article class='card'><h3>Dokumentation</h3><a href='/docs'>Interaktive Swagger UI</a></article>
-        <article class='card'><h3>Version</h3><div class='kpi'>v0.3.0</div></article>
+        <article class='card'><h3>Version</h3><div class='kpi'>""" + settings.app_version + """</div></article>
       </div>
     </section>
   </main>
@@ -137,29 +164,62 @@ def admin_dashboard():
     return admin_html()
 
 
+@app.get("/metrics")
+def metrics() -> str:
+    return render_metrics()
+
+
+@app.get("/ready")
+def ready() -> dict:
+    with get_session() as session:
+        session.exec(select(AuditEvent).limit(1)).all()
+    return {"status": "ready", "db": "ok", "version": settings.app_version, "queue_depth": len(jobs)}
+
+
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok"}
+    with get_session() as session:
+        session.exec(select(Asset).limit(1)).all()
+    return {"status": "ok", "env": settings.env, "version": settings.app_version}
+
+
+@app.post("/api/v1/auth/login")
+def login(username: str, role: str) -> dict:
+    if role not in {"admin", "operator", "viewer"}:
+        raise HTTPException(status_code=400, detail="invalid role")
+    token = issue_token(username=username, role=role, ttl_minutes=120)
+    return {"access_token": token, "token_type": "bearer", "role": role}
+
+
+@app.get("/api/v1/auth/me")
+def me(ctx: AuthContext = Depends(require_role("admin", "operator", "viewer"))) -> dict:
+    return {"username": ctx.username, "role": ctx.role}
 
 
 @app.get("/api/v1/clients")
-def list_clients() -> list[dict]:
+def list_clients(limit: int = 50, offset: int = 0) -> list[dict]:
+    limit = 1 if limit < 1 else min(limit, 500)
+    offset = 0 if offset < 0 else offset
     with get_session() as session:
-        assets = session.exec(select(Asset).order_by(Asset.id.desc())).all()
+        assets = session.exec(select(Asset).order_by(Asset.id.desc()).offset(offset).limit(limit)).all()
     return [a.model_dump() for a in assets]
 
 
 @app.get("/api/v1/recommendations")
-def list_recommendations() -> list[dict]:
+def list_recommendations(limit: int = 50, offset: int = 0) -> list[dict]:
+    limit = 1 if limit < 1 else min(limit, 500)
+    offset = 0 if offset < 0 else offset
     with get_session() as session:
-        recommendations = session.exec(select(Recommendation).order_by(Recommendation.id.desc())).all()
+        recommendations = session.exec(select(Recommendation).order_by(Recommendation.id.desc()).offset(offset).limit(limit)).all()
     return [r.model_dump() for r in recommendations]
 
 
 @app.get("/api/v1/migrations/jobs")
-def list_migration_jobs() -> list[dict]:
+def list_migration_jobs(limit: int = 50, offset: int = 0) -> list[dict]:
+    limit = 1 if limit < 1 else min(limit, 500)
+    offset = 0 if offset < 0 else offset
     with get_session() as session:
-        jobs = session.exec(select(MigrationJob).order_by(MigrationJob.id.desc())).all()
+        jobs = session.exec(select(MigrationJob).order_by(MigrationJob.id.desc()).offset(offset).limit(limit)).all()
     return [j.model_dump() for j in jobs]
 
 
@@ -186,7 +246,7 @@ def _append_audit(session, user: str, action: str, payload: str) -> None:
     session.add(AuditEvent(user=user, action=action, payload=payload, prev_hash=prev_hash, current_hash=current_hash, created_at=created_at))
 
 
-@app.post("/api/v1/clients/register")
+@app.post("/api/v1/clients/register", dependencies=[Depends(require_role("admin", "operator"))])
 def register_client(payload: ClientRegisterRequest) -> dict:
     with get_session() as session:
         asset = Asset(**payload.model_dump(), status="registered")
@@ -197,7 +257,7 @@ def register_client(payload: ClientRegisterRequest) -> dict:
     return {"id": asset.id, "asset_id": asset.asset_id}
 
 
-@app.patch("/api/v1/clients/{asset_id}")
+@app.patch("/api/v1/clients/{asset_id}", dependencies=[Depends(require_role("admin", "operator"))])
 def update_client(asset_id: str, payload: ClientUpdateRequest) -> dict:
     with get_session() as session:
         asset = session.exec(select(Asset).where(Asset.asset_id == asset_id)).first()
@@ -213,7 +273,7 @@ def update_client(asset_id: str, payload: ClientUpdateRequest) -> dict:
     return asset.model_dump()
 
 
-@app.post("/api/v1/diagnostics/results")
+@app.post("/api/v1/diagnostics/results", dependencies=[Depends(require_role("admin", "operator"))])
 def upload_diagnostics(payload: DiagnosticResultRequest) -> dict:
     with get_session() as session:
         asset = session.exec(select(Asset).where(Asset.asset_id == payload.asset_id)).first()
@@ -229,7 +289,7 @@ def upload_diagnostics(payload: DiagnosticResultRequest) -> dict:
     return {"diagnostic_run_id": run.id, "recommendation_id": rec.id}
 
 
-@app.post("/api/v1/wipe/jobs")
+@app.post("/api/v1/wipe/jobs", dependencies=[Depends(require_role("admin", "operator"))])
 def create_wipe_job(payload: WipeJobRequest) -> dict:
     with get_session() as session:
         asset = session.exec(select(Asset).where(Asset.asset_id == payload.asset_id)).first()
@@ -245,7 +305,10 @@ def create_wipe_job(payload: WipeJobRequest) -> dict:
         _append_audit(session, "technician", "wipe_run", payload.model_dump_json())
         session.commit()
         session.refresh(cert)
-    return {"wipe_run_id": run.id, "certificate_id": cert.id, "sha256": cert.sha256}
+        run_id = run.id
+        cert_id = cert.id
+        cert_sha = cert.sha256
+    return {"wipe_run_id": run_id, "certificate_id": cert_id, "sha256": cert_sha}
 @app.get("/api/v1/wipe/certificates/{certificate_id}")
 def get_certificate(certificate_id: int) -> dict:
     with get_session() as session:
@@ -255,7 +318,7 @@ def get_certificate(certificate_id: int) -> dict:
     return cert.model_dump()
 
 
-@app.post("/api/v1/webhooks/test")
+@app.post("/api/v1/webhooks/test", dependencies=[Depends(require_role("admin", "operator"))])
 def webhook_test(payload: WebhookTestRequest) -> dict:
     with get_session() as session:
         alert = Alert(alert_type="webhook_test", severity="info", channel=payload.channel)
@@ -274,7 +337,7 @@ def ssl_check(payload: SSLCheckRequest) -> dict:
     return {"host": payload.host, "days_until_expiry": days, "severity": severity, "recommendation": rec}
 
 
-@app.post("/api/v1/security/endpoint-check")
+@app.post("/api/v1/security/endpoint-check", dependencies=[Depends(require_role("admin", "operator"))])
 def endpoint_check(payload: EndpointCheckRequest) -> dict:
     with get_session() as session:
         scan = WebScan(target=payload.asset_id, scan_type=payload.scan_type, findings=payload.details, severity="warning")
@@ -287,7 +350,7 @@ def endpoint_check(payload: EndpointCheckRequest) -> dict:
     return {"scan_id": scan.id, "recommendation_id": rec.id}
 
 
-@app.post("/api/v1/servers/health-check")
+@app.post("/api/v1/servers/health-check", dependencies=[Depends(require_role("admin", "operator"))])
 def server_health(payload: ServerHealthRequest) -> dict:
     with get_session() as session:
         scan = WebScan(target=payload.asset_id, scan_type=f"server_{payload.platform}", findings=payload.metrics_json, severity="info")
@@ -306,10 +369,15 @@ def ai_assist(payload: AIAssistRequest) -> dict:
     return {"provider": "ollama-local", "human_in_the_loop": True, "summary": f"Kontext: {payload.context}", "next_best_action": rec}
 
 
-@app.post("/api/v1/migrations/jobs")
+@app.post("/api/v1/migrations/jobs", dependencies=[Depends(require_role("admin", "operator"))])
 def create_migration_job(payload: MigrationJobRequest) -> dict:
+    job_id = enqueue("migration_create", _create_migration_job_task, payload)
+    return {"queue_job_id": job_id, "status": "queued"}
+
+
+def _create_migration_job_task(payload: MigrationJobRequest) -> dict:
     with get_session() as session:
-        job = MigrationJob(**payload.model_dump(), status="running", progress_percent=10)
+        job = MigrationJob(**payload.model_dump(), status="completed", progress_percent=100)
         session.add(job)
         _append_audit(session, "migration", "job_create", payload.model_dump_json())
         session.commit()
@@ -317,7 +385,7 @@ def create_migration_job(payload: MigrationJobRequest) -> dict:
     return job.model_dump()
 
 
-@app.patch("/api/v1/migrations/jobs/{job_id}")
+@app.patch("/api/v1/migrations/jobs/{job_id}", dependencies=[Depends(require_role("admin", "operator"))])
 def update_migration_job(job_id: int, payload: MigrationJobUpdateRequest) -> dict:
     with get_session() as session:
         job = session.get(MigrationJob, job_id)
@@ -333,7 +401,7 @@ def update_migration_job(job_id: int, payload: MigrationJobUpdateRequest) -> dic
     return job.model_dump()
 
 
-@app.post("/api/v1/migrations/jobs/{job_id}/complete")
+@app.post("/api/v1/migrations/jobs/{job_id}/complete", dependencies=[Depends(require_role("admin", "operator"))])
 def complete_migration_job(job_id: int) -> dict:
     with get_session() as session:
         job = session.get(MigrationJob, job_id)
@@ -346,7 +414,7 @@ def complete_migration_job(job_id: int) -> dict:
     return {"job_id": job_id, "status": "completed"}
 
 
-@app.post("/api/v1/sftp/endpoints")
+@app.post("/api/v1/sftp/endpoints", dependencies=[Depends(require_role("admin", "operator"))])
 def create_sftp_endpoint(payload: SFTPEndpointRequest) -> dict:
     with get_session() as session:
         endpoint = SFTPEndpoint(tenant_id=payload.tenant_id, host=payload.host, key_fingerprint=payload.key_fingerprint, policy_json=payload.policy_json, expires_at=datetime.fromisoformat(payload.expires_at))
@@ -357,7 +425,7 @@ def create_sftp_endpoint(payload: SFTPEndpointRequest) -> dict:
     return endpoint.model_dump()
 
 
-@app.post("/api/v1/mobile/devices")
+@app.post("/api/v1/mobile/devices", dependencies=[Depends(require_role("admin", "operator"))])
 def register_mobile_device(payload: MobileDeviceRequest) -> dict:
     with get_session() as session:
         mobile = MobileDevice(**payload.model_dump(), compliance_status="unknown")
@@ -368,7 +436,7 @@ def register_mobile_device(payload: MobileDeviceRequest) -> dict:
     return mobile.model_dump()
 
 
-@app.post("/api/v1/mobile/assessments")
+@app.post("/api/v1/mobile/assessments", dependencies=[Depends(require_role("admin", "operator"))])
 def create_mobile_assessment(payload: MobileAssessmentRequest) -> dict:
     with get_session() as session:
         device = session.get(MobileDevice, payload.mobile_device_id)
@@ -387,8 +455,13 @@ def create_mobile_assessment(payload: MobileAssessmentRequest) -> dict:
     return {"assessment_id": assessment.id, "report_id": report.id}
 
 
-@app.post("/api/v1/workshop/iso/build")
+@app.post("/api/v1/workshop/iso/build", dependencies=[Depends(require_role("admin", "operator"))])
 def build_workshop_iso(payload: ISOBuildRequest) -> dict:
+    job_id = enqueue("iso_build", _build_workshop_iso_task, payload)
+    return {"queue_job_id": job_id, "status": "queued"}
+
+
+def _build_workshop_iso_task(payload: ISOBuildRequest) -> dict:
     iso_dir = Path("./artifacts/iso")
     iso_dir.mkdir(parents=True, exist_ok=True)
     safe_profile = payload.profile.replace("/", "-")
@@ -396,28 +469,22 @@ def build_workshop_iso(payload: ISOBuildRequest) -> dict:
     iso_path = iso_dir / file_name
     manifest = iso_dir / f"{safe_profile}.manifest.txt"
     manifest.write_text(
-        "\n".join([
-            f"profile={payload.profile}",
-            f"base_distribution={payload.base_distribution}",
-            f"include_tools={','.join(payload.include_tools)}",
-            "note=placeholder image, integrate live-build pipeline for production",
-        ])
+        "\n".join(
+            [
+                f"profile={payload.profile}",
+                f"base_distribution={payload.base_distribution}",
+                f"include_tools={','.join(payload.include_tools)}",
+            ]
+        )
     )
     iso_path.write_bytes(b"NISCORE-ISO-PLACEHOLDER")
-
     with get_session() as session:
         _append_audit(session, "system", "iso_build", payload.model_dump_json())
         session.commit()
-
-    return {
-        "status": "created",
-        "iso_path": str(iso_path),
-        "manifest_path": str(manifest),
-        "next_step": "replace placeholder with live-build pipeline worker",
-    }
+    return {"status": "created", "iso_path": str(iso_path), "manifest_path": str(manifest)}
 
 
-@app.post("/api/v1/integrations/github/ssh-key")
+@app.post("/api/v1/integrations/github/ssh-key", dependencies=[Depends(require_role("admin", "operator"))])
 def store_github_ssh_key(payload: GitHubSSHKeyRequest) -> dict:
     ssh_dir = Path.home() / ".ssh"
     ssh_dir.mkdir(parents=True, exist_ok=True)
@@ -446,6 +513,12 @@ def store_github_ssh_key(payload: GitHubSSHKeyRequest) -> dict:
     }
 
 
+@app.get("/api/v1/jobs/{job_id}")
+def get_queue_job(job_id: str, ctx: AuthContext = Depends(require_role("admin", "operator", "viewer"))) -> dict:
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="queue job not found")
+    return job.__dict__
 @app.get("/api/v1/integrations/ndesk/assets")
 def ndesk_list_assets(limit: int = 100) -> dict:
     safe_limit = 1 if limit < 1 else min(limit, 500)

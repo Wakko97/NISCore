@@ -1,6 +1,8 @@
 from sqlmodel import SQLModel, Session, create_engine
 
-engine = create_engine("sqlite:///./niscore.db", echo=False)
+from app.config import settings
+
+engine = create_engine(settings.database_url, echo=False)
 
 
 def init_db() -> None:
