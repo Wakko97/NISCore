@@ -1,4 +1,6 @@
 from uuid import uuid4
+import os
+from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.db import init_db
@@ -201,7 +203,7 @@ def test_flow_module_ticket_link_and_offline_bundle():
         c.post('/api/v1/clients/register', json={"tenant_id":"default","asset_id":asset,"serial_number":"s8","device_type":"workstation"}, headers=token())
         run = c.post(
             '/api/v1/modules/run',
-            json={"module": "hardware", "asset_id": asset, "tenant_id": "default", "operator": "ops2", "parameters": {"deep_scan": True}},
+            json={"module": "hardware", "asset_id": asset, "tenant_id": "default", "operator": "ops2", "parameters": {"collector": "bootstick", "deep_scan": True}},
             headers=token("operator"),
         )
         assert run.status_code == 200
@@ -233,6 +235,9 @@ def test_flow_module_ticket_link_and_offline_bundle():
         )
         assert bundle.status_code == 200
         assert bundle.json()["created"] is True
+        assert Path(bundle.json()["bundle_path"]).exists()
+        assert Path(bundle.json()["bundle_sha256_path"]).exists()
+        assert Path(bundle.json()["bundle_signature_path"]).exists()
 
 
 def test_flow_module_progress_asset_mismatch_guard():
@@ -252,3 +257,79 @@ def test_flow_module_progress_asset_mismatch_guard():
             headers=token("operator"),
         )
         assert progress.status_code == 400
+
+
+def test_flow_module_run_requires_module_specific_parameters():
+    with TestClient(app) as c:
+        asset = aid("e2e11")
+        c.post('/api/v1/clients/register', json={"tenant_id":"default","asset_id":asset,"serial_number":"s11","device_type":"server"}, headers=token())
+        run = c.post(
+            '/api/v1/modules/run',
+            json={"module": "backup", "asset_id": asset, "tenant_id": "default", "operator": "ops4", "parameters": {}},
+            headers=token("operator"),
+        )
+        assert run.status_code == 400
+        assert "missing module parameters" in run.json()["error"]
+
+
+def test_flow_agent_heartbeat_updates_session():
+    with TestClient(app) as c:
+        os.environ["NISCORE_API_TOKEN"] = "dev-api-token"
+        asset = aid("e2e12")
+        c.post('/api/v1/clients/register', json={"tenant_id":"default","asset_id":asset,"serial_number":"s12","device_type":"client"}, headers=token())
+        enroll = c.post(
+            "/api/v1/agents/enroll",
+            json={"agent_id": "agent-e2e12", "asset_id": asset, "token": "dev-api-token", "platform": "windows", "mode": "agent"},
+            headers=token("operator"),
+        )
+        assert enroll.status_code == 200
+        hb = c.post(
+            "/api/v1/agents/agent-e2e12/heartbeat",
+            json={"status": "degraded", "lease_seconds": 15, "details": "temporary packet loss"},
+            headers=token("operator"),
+        )
+        assert hb.status_code == 200
+        assert hb.json()["status"] == "degraded"
+        assert hb.json()["lease_seconds"] == 30
+
+
+def test_flow_ndesk_ticket_event_maps_to_run_status():
+    with TestClient(app) as c:
+        asset = aid("e2e13")
+        c.post('/api/v1/clients/register', json={"tenant_id":"default","asset_id":asset,"serial_number":"s13","device_type":"server"}, headers=token())
+        run = c.post(
+            '/api/v1/modules/run',
+            json={"module": "migration", "asset_id": asset, "tenant_id": "default", "operator": "ops5", "parameters": {"source": "m365", "target": "nextcloud"}},
+            headers=token("operator"),
+        )
+        run_id = run.json()["run_id"]
+        c.post(
+            f"/api/v1/modules/{run_id}/tickets/link",
+            json={"ticket_id": "NDSK-2026-0099", "relation": "primary", "actor": "ops5"},
+            headers=token("operator"),
+        )
+        event = c.post(
+            "/api/v1/integrations/ndesk/tickets/events",
+            json={"ticket_id": "NDSK-2026-0099", "status": "closed", "actor": "ndesk", "note": "done"},
+            headers=token("operator"),
+        )
+        assert event.status_code == 200
+        assert event.json()["run_status"] == "completed"
+
+
+def test_flow_module_execute_generates_domain_evidence():
+    with TestClient(app) as c:
+        asset = aid("e2e14")
+        c.post('/api/v1/clients/register', json={"tenant_id":"default","asset_id":asset,"serial_number":"s14","device_type":"server"}, headers=token())
+        run = c.post(
+            '/api/v1/modules/run',
+            json={"module": "migration", "asset_id": asset, "tenant_id": "default", "operator": "ops6", "parameters": {"source": "m365", "target": "nextcloud"}},
+            headers=token("operator"),
+        )
+        run_id = run.json()["run_id"]
+        execute = c.post(f"/api/v1/modules/{run_id}/execute?actor=ops6", headers=token("operator"))
+        assert execute.status_code == 200
+        body = execute.json()
+        assert body["status"] == "completed"
+        assert body["result"]["execution"]["engine"] == "migration-core-v1"
+        assert "mapping_report" in body["result"]["execution"]["evidence"]
