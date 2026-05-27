@@ -53,6 +53,7 @@ from app.schemas import (
     StorageDetectRequest,
     StorageWipeRequest,
     LoginRequest,
+    MissionRunRequest,
 )
 from app.services import (
     NdeskClientError,
@@ -261,6 +262,62 @@ def _append_audit(session, user: str, action: str, payload: str) -> None:
     created_at = datetime.now(timezone.utc).replace(tzinfo=None)
     current_hash = hash_chain(prev_hash, f"{action}:{payload}", created_at)
     session.add(AuditEvent(user=user, action=action, payload=payload, prev_hash=prev_hash, current_hash=current_hash, created_at=created_at))
+
+
+@app.post("/api/v1/missions/run", dependencies=[Depends(require_role("admin", "operator"))])
+def run_mission(payload: MissionRunRequest) -> dict:
+    with get_session() as session:
+        asset = session.exec(select(Asset).where(Asset.asset_id == payload.asset_id)).first()
+        if not asset:
+            asset = Asset(
+                tenant_id=payload.tenant_id,
+                asset_id=payload.asset_id,
+                serial_number=payload.serial_number,
+                device_type=payload.device_type,
+                status="registered",
+            )
+            session.add(asset)
+            session.flush()
+            _append_audit(session, "system", "client_register", payload.model_dump_json())
+        else:
+            asset.serial_number = payload.serial_number
+            asset.device_type = payload.device_type
+            session.add(asset)
+            _append_audit(session, "system", "client_update", payload.model_dump_json())
+
+        run = DiagnosticRun(asset_id=asset.id, technician=payload.technician, result=payload.finding, raw_json='{"source":"mission-control"}')
+        session.add(run)
+        rec = _create_recommendation(session, payload.finding, 'mission-control')
+        _append_audit(session, payload.technician, "diagnostic_upload", payload.model_dump_json())
+
+        wipe_result = None
+        if payload.with_wipe:
+            wipe_run = WipeRun(
+                asset_id=asset.id,
+                method=payload.wipe_method,
+                standard=payload.wipe_standard,
+                status="completed",
+                command_log=f"wipe {payload.wipe_method} {payload.wipe_standard}",
+                device_fingerprint=f"{asset.asset_id}:{asset.serial_number}",
+            )
+            session.add(wipe_run)
+            session.flush()
+            sha, signature = sign_like(f"{asset.asset_id}:{wipe_run.id}:{wipe_run.command_log}")
+            cert = Certificate(wipe_run_id=wipe_run.id, sha256=sha, signature=signature, pdf_path=f"/certs/wipe_{wipe_run.id}.pdf")
+            session.add(cert)
+            _append_audit(session, payload.technician, "wipe_run", payload.model_dump_json())
+            wipe_result = {"wipe_run_id": wipe_run.id, "certificate_id": cert.id, "sha256": cert.sha256}
+
+        session.commit()
+        session.refresh(run)
+        session.refresh(rec)
+
+    return {
+        "asset_id": payload.asset_id,
+        "diagnostic_run_id": run.id,
+        "recommendation": rec.model_dump(),
+        "wipe": wipe_result,
+    }
 
 
 @app.post("/api/v1/clients/register", dependencies=[Depends(require_role("admin", "operator"))])
