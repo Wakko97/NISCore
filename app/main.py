@@ -8,7 +8,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 import os
 from pathlib import Path
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from sqlmodel import select
 
 from app.config import settings
@@ -164,9 +164,9 @@ def admin_dashboard():
     return admin_html()
 
 
-@app.get("/metrics")
-def metrics() -> str:
-    return render_metrics()
+@app.get("/metrics", response_class=PlainTextResponse)
+def metrics() -> PlainTextResponse:
+    return PlainTextResponse(render_metrics(), media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
 @app.get("/ready")
@@ -184,9 +184,13 @@ def health() -> dict:
 
 
 @app.post("/api/v1/auth/login")
-def login(username: str, role: str) -> dict:
+def login(username: str, role: str, password: str) -> dict:
     if role not in {"admin", "operator", "viewer"}:
         raise HTTPException(status_code=400, detail="invalid role")
+    if not settings.api_token:
+        raise HTTPException(status_code=503, detail="auth credentials not configured")
+    if not secure_equals(password, settings.api_token):
+        raise HTTPException(status_code=401, detail="invalid credentials")
     token = issue_token(username=username, role=role, ttl_minutes=120)
     return {"access_token": token, "token_type": "bearer", "role": role}
 
