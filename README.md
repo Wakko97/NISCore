@@ -40,6 +40,14 @@ uvicorn app.main:app --reload
 - `GET /api/v1/storage/devices/{asset_id}`
 - `POST /api/v1/storage/wipe`
 - `POST /api/v1/wipe/jobs`
+- `POST /api/v1/wipe/execution-jobs`
+- `POST /api/v1/wipe/execution-jobs/{job_id}/approve`
+- `POST /api/v1/wipe/execution-jobs/{job_id}/reject`
+- `POST /api/v1/wipe/execution-jobs/{job_id}/cancel`
+- `POST /api/v1/wipe/execution-jobs/{job_id}/dispatch`
+- `GET /api/v1/wipe/execution-jobs`
+- `POST /api/v1/wipe/execution-jobs/{job_id}/agent/build`
+  - unterstützt `output_format`: `dir`, `tar.gz`, `zip`
 - `GET /api/v1/wipe/certificates/{certificate_id}`
 - `POST /api/v1/webhooks/test`
 - `POST /api/v1/web/scans/ssl-check`

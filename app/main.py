@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import tarfile
+import zipfile
 from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -27,6 +30,7 @@ from app.models import (
     StorageDevice,
     SFTPEndpoint,
     WebScan,
+    WipeExecutionJob,
     WipeRun,
 )
 from app.schemas import (
@@ -46,6 +50,11 @@ from app.schemas import (
     GitHubSSHKeyRequest,
     WebhookTestRequest,
     WipeJobRequest,
+    WipeExecutionApprovalRequest,
+    WipeExecutionCancelRequest,
+    WipeExecutionRejectRequest,
+    WipeAgentBuildRequest,
+    WipeExecutionJobRequest,
     NdeskTicketCreateRequest,
     NdeskUserRequest,
     NdeskUserUpdateRequest,
@@ -448,6 +457,226 @@ def create_wipe_job(payload: WipeJobRequest) -> dict:
         cert_id = cert.id
         cert_sha = cert.sha256
     return {"wipe_run_id": run_id, "certificate_id": cert_id, "sha256": cert_sha}
+
+
+@app.post("/api/v1/wipe/execution-jobs", dependencies=[Depends(require_role("admin", "operator"))])
+def create_wipe_execution_job(payload: WipeExecutionJobRequest) -> dict:
+    with get_session() as session:
+        asset = session.exec(select(Asset).where(Asset.asset_id == payload.asset_id)).first()
+        if not asset:
+            raise HTTPException(status_code=404, detail="asset not found")
+        job = WipeExecutionJob(
+            asset_id=asset.id,
+            target_serial=payload.serial_number,
+            storage_type=payload.storage_type,
+            execution_mode=payload.execution_mode,
+            standard_profile=payload.standard_profile,
+            status="pending_approval",
+            created_by=payload.created_by,
+            device_fingerprint=build_device_fingerprint(payload.asset_id, payload.serial_number, payload.execution_mode, payload.standard_profile),
+        )
+        session.add(job)
+        _append_audit(session, payload.created_by, "wipe_execution_job_created", payload.model_dump_json())
+        session.commit()
+        session.refresh(job)
+    return {"execution_job_id": job.id, "status": job.status}
+
+
+@app.post("/api/v1/wipe/execution-jobs/{job_id}/approve", dependencies=[Depends(require_role("admin"))])
+def approve_wipe_execution_job(job_id: int, payload: WipeExecutionApprovalRequest) -> dict:
+    with get_session() as session:
+        job = session.get(WipeExecutionJob, job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="wipe execution job not found")
+        if job.status != "pending_approval":
+            raise HTTPException(status_code=400, detail="job is not pending approval")
+        if payload.approved_by == job.created_by:
+            raise HTTPException(status_code=400, detail="four-eyes principle violated")
+        job.approved_by = payload.approved_by
+        job.approval_note = payload.approval_note
+        job.status = "approved"
+        session.add(job)
+        _append_audit(session, payload.approved_by, "wipe_execution_job_approved", f"{job_id}:{payload.approval_note}")
+        session.commit()
+    return {"execution_job_id": job_id, "status": "approved", "approved_by": payload.approved_by}
+
+
+@app.post("/api/v1/wipe/execution-jobs/{job_id}/dispatch", dependencies=[Depends(require_role("admin", "operator"))])
+def dispatch_wipe_execution_job(job_id: int) -> dict:
+    with get_session() as session:
+        job = session.get(WipeExecutionJob, job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="wipe execution job not found")
+        if job.status not in {"approved", "dispatched_agent", "dispatched_boot"}:
+            raise HTTPException(status_code=400, detail="job must be approved before dispatch")
+        if job.status in {"dispatched_agent", "dispatched_boot"}:
+            return {"execution_job_id": job_id, "status": job.status, "execution_mode": job.execution_mode}
+        job.status = "dispatched_boot" if job.execution_mode == "boot" else "dispatched_agent"
+        status = job.status
+        execution_mode = job.execution_mode
+        session.add(job)
+        _append_audit(session, "orchestrator", "wipe_execution_job_dispatched", str(job_id))
+        session.commit()
+    return {"execution_job_id": job_id, "status": status, "execution_mode": execution_mode}
+
+
+@app.get("/api/v1/wipe/execution-jobs", dependencies=[Depends(require_role("admin", "operator", "viewer"))])
+def list_wipe_execution_jobs(limit: int = 50) -> list[dict]:
+    limit = 1 if limit < 1 else min(limit, 500)
+    with get_session() as session:
+        entries = session.exec(select(WipeExecutionJob).order_by(WipeExecutionJob.id.desc()).limit(limit)).all()
+    return [e.model_dump() for e in entries]
+
+
+@app.post("/api/v1/wipe/execution-jobs/{job_id}/agent/build", dependencies=[Depends(require_role("admin", "operator"))])
+def build_wipe_agent(job_id: int, payload: WipeAgentBuildRequest) -> dict:
+    if payload.execution_job_id != job_id:
+        raise HTTPException(status_code=400, detail="job id mismatch")
+    with get_session() as session:
+        job = session.get(WipeExecutionJob, job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="wipe execution job not found")
+        if job.status not in {"approved", "dispatched_agent", "dispatched_boot"}:
+            raise HTTPException(status_code=400, detail="wipe execution job is not approved")
+    job_ref = enqueue("wipe_agent_build", _build_wipe_agent_task, payload)
+    return {"queue_job_id": job_ref, "status": "queued"}
+
+
+@app.post("/api/v1/wipe/execution-jobs/{job_id}/reject", dependencies=[Depends(require_role("admin"))])
+def reject_wipe_execution_job(job_id: int, payload: WipeExecutionRejectRequest) -> dict:
+    with get_session() as session:
+        job = session.get(WipeExecutionJob, job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="wipe execution job not found")
+        if job.status != "pending_approval":
+            raise HTTPException(status_code=400, detail="job can only be rejected from pending_approval")
+        job.status = "rejected"
+        job.rejected_by = payload.rejected_by
+        job.rejection_note = payload.rejection_note
+        session.add(job)
+        _append_audit(session, payload.rejected_by, "wipe_execution_job_rejected", f"{job_id}:{payload.rejection_note}")
+        session.commit()
+    return {"execution_job_id": job_id, "status": "rejected", "rejected_by": payload.rejected_by}
+
+
+@app.post("/api/v1/wipe/execution-jobs/{job_id}/cancel", dependencies=[Depends(require_role("admin", "operator"))])
+def cancel_wipe_execution_job(job_id: int, payload: WipeExecutionCancelRequest) -> dict:
+    with get_session() as session:
+        job = session.get(WipeExecutionJob, job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="wipe execution job not found")
+        if job.status in {"completed", "canceled"}:
+            raise HTTPException(status_code=400, detail="job can not be canceled from current state")
+        job.status = "canceled"
+        job.canceled_by = payload.canceled_by
+        job.cancel_note = payload.cancel_note
+        session.add(job)
+        _append_audit(session, payload.canceled_by, "wipe_execution_job_canceled", f"{job_id}:{payload.cancel_note}")
+        session.commit()
+    return {"execution_job_id": job_id, "status": "canceled", "canceled_by": payload.canceled_by}
+
+
+def _build_wipe_agent_task(payload: WipeAgentBuildRequest) -> dict:
+    with get_session() as session:
+        job = session.get(WipeExecutionJob, payload.execution_job_id)
+        if not job:
+            raise RuntimeError("wipe execution job not found")
+        if job.status not in {"approved", "dispatched_agent", "dispatched_boot"}:
+            raise RuntimeError("wipe execution job is not approved")
+        asset = session.get(Asset, job.asset_id)
+        if not asset:
+            raise RuntimeError("asset for wipe execution job not found")
+
+        agent_dir = Path("./artifacts/agents")
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        package_dir = agent_dir / f"wipe-agent-job-{job.id}"
+        package_dir.mkdir(parents=True, exist_ok=True)
+
+        config_json = package_dir / "agent_config.json"
+        config_json.write_text(
+            json.dumps(
+                jsonable_encoder(
+                    {
+                        "execution_job_id": job.id,
+                        "asset_id": asset.asset_id,
+                        "target_serial": job.target_serial,
+                        "storage_type": job.storage_type,
+                        "execution_mode": job.execution_mode,
+                        "standard_profile": job.standard_profile,
+                        "approved_by": job.approved_by,
+                        "device_fingerprint": job.device_fingerprint,
+                        "os_target": payload.os_target,
+                    }
+                ),
+                indent=2,
+            )
+        )
+
+        runner = package_dir / "run_wipe_agent.sh"
+        runner.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+CFG_FILE=${1:-agent_config.json}
+if [[ ! -f "$CFG_FILE" ]]; then
+  echo "agent config not found: $CFG_FILE" >&2
+  exit 1
+fi
+echo "Starting wipe agent with config: $CFG_FILE"
+cat "$CFG_FILE"
+echo "MVP mode: orchestration-only runner. Integrate native wipe binary here."
+"""
+        )
+        runner.chmod(0o755)
+
+        readme = package_dir / "README.txt"
+        readme.write_text(
+            "NISCore Wipe Agent Package\n"
+            "- Entpacken auf Zielsystem\n"
+            "- agent_config.json prüfen (Job/Serial/Fingerprint)\n"
+            "- ./run_wipe_agent.sh ausführen\n"
+            "- Für produktiv: native wipe engine + signed reporting ergänzen\n"
+        )
+
+        package_path = str(package_dir)
+        artifact_path = None
+        if payload.output_format == "tar.gz":
+            tar_path = agent_dir / f"wipe-agent-job-{job.id}.tar.gz"
+            with tarfile.open(tar_path, "w:gz") as tar:
+                tar.add(package_dir, arcname=package_dir.name)
+            artifact_path = str(tar_path)
+        elif payload.output_format == "zip":
+            zip_path = agent_dir / f"wipe-agent-job-{job.id}.zip"
+            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for f in package_dir.rglob("*"):
+                    zf.write(f, arcname=f.relative_to(package_dir.parent))
+            artifact_path = str(zip_path)
+
+        manifest_data = json.dumps(
+            {
+                "job_id": job.id,
+                "asset_id": asset.asset_id,
+                "status": job.status,
+                "output_format": payload.output_format,
+                "artifact_path": artifact_path,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            indent=2,
+        )
+        manifest_sha, manifest_sig = sign_like(manifest_data)
+        (package_dir / "manifest.json").write_text(manifest_data)
+        (package_dir / "manifest.sha256").write_text(manifest_sha + "\n")
+        (package_dir / "manifest.sig").write_text(manifest_sig + "\n")
+
+        _append_audit(session, "orchestrator", "wipe_agent_generated", f"job_id={job.id};os={payload.os_target}")
+        session.commit()
+    return {
+        "status": "created",
+        "package_path": package_path,
+        "config_path": str(config_json),
+        "runner_path": str(runner),
+        "artifact_path": artifact_path,
+        "output_format": payload.output_format,
+    }
 @app.get("/api/v1/wipe/certificates/{certificate_id}")
 def get_certificate(certificate_id: int) -> dict:
     with get_session() as session:
