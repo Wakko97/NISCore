@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 import os
 from pathlib import Path
 from fastapi.responses import HTMLResponse
@@ -11,6 +11,7 @@ from sqlmodel import select
 
 from app.db import get_session, init_db
 from app.models import (
+    LiveStatusEvent,
     Alert,
     Asset,
     AuditEvent,
@@ -45,11 +46,46 @@ from app.schemas import (
     NdeskTicketCreateRequest,
     NdeskUserRequest,
     NdeskUserUpdateRequest,
+    LiveStatusEventRequest,
 )
-from app.services import NdeskClientError, hash_chain, ndesk_request, recommend_for_finding, sign_like, ssl_days_until_expiry
+from app.services import NdeskClientError, hash_chain, ndesk_request, recommend_for_finding, secure_equals, sign_like, ssl_days_until_expiry
 from app.frontend import admin_html
 
 app = FastAPI(title="NISCore API", version="0.3.0")
+
+
+class LiveStatusHub:
+    def __init__(self) -> None:
+        self.connections: list[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket) -> None:
+        await websocket.accept()
+        self.connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket) -> None:
+        if websocket in self.connections:
+            self.connections.remove(websocket)
+
+    async def broadcast(self, message: dict) -> None:
+        stale: list[WebSocket] = []
+        for conn in self.connections:
+            try:
+                await conn.send_json(message)
+            except RuntimeError:
+                stale.append(conn)
+        for conn in stale:
+            self.disconnect(conn)
+
+
+live_status_hub = LiveStatusHub()
+
+
+def _require_live_token(x_live_token: str | None = Header(default=None)) -> None:
+    expected = os.getenv("NISCORE_LIVE_TOKEN", "").strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail="live status token not configured")
+    if not x_live_token or not secure_equals(x_live_token, expected):
+        raise HTTPException(status_code=401, detail="invalid live status token")
 
 
 @app.on_event("startup")
@@ -472,3 +508,49 @@ def ndesk_update_user(user_id: str, payload: NdeskUserUpdateRequest) -> dict:
         _append_audit(session, "ndesk", "user_update", f"{user_id}:{updates}")
         session.commit()
     return {"source": "ndesk", "user": updated}
+
+
+@app.post("/api/v1/live/status", dependencies=[Depends(_require_live_token)])
+async def push_live_status(payload: LiveStatusEventRequest) -> dict:
+    safe_progress = max(0, min(100, payload.progress_percent))
+    with get_session() as session:
+        event = LiveStatusEvent(
+            asset_id=payload.asset_id,
+            source=payload.source,
+            stage=payload.stage,
+            status=payload.status,
+            progress_percent=safe_progress,
+            details=payload.details,
+        )
+        session.add(event)
+        _append_audit(session, payload.source, "live_status_push", payload.model_dump_json())
+        session.commit()
+        session.refresh(event)
+
+    body = event.model_dump()
+    await live_status_hub.broadcast(body)
+    return {"stored": True, "event_id": event.id}
+
+
+@app.get("/api/v1/live/status", dependencies=[Depends(_require_live_token)])
+def list_live_status(limit: int = 100) -> list[dict]:
+    safe_limit = 1 if limit < 1 else min(limit, 500)
+    with get_session() as session:
+        events = session.exec(select(LiveStatusEvent).order_by(LiveStatusEvent.id.desc()).limit(safe_limit)).all()
+    return [event.model_dump() for event in events]
+
+
+@app.websocket("/ws/live/status")
+async def live_status_websocket(websocket: WebSocket):
+    expected = os.getenv("NISCORE_LIVE_TOKEN", "").strip()
+    token = websocket.query_params.get("token", "")
+    if not expected or not secure_equals(token, expected):
+        await websocket.close(code=1008)
+        return
+
+    await live_status_hub.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        live_status_hub.disconnect(websocket)

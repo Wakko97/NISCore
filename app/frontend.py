@@ -21,6 +21,7 @@ button{background:#3659d9;cursor:pointer} pre{white-space:pre-wrap;background:#0
 <div class='card'><h3>ISO Build</h3><input id='profile' placeholder='profile' value='workshop'><button onclick='iso()'>ISO erzeugen</button><pre id='out4'></pre></div>
 <div class='card'><h3>Migration Job</h3><input id='tenant' placeholder='tenant' value='default'><input id='jtype' placeholder='job_type' value='imap'><input id='src' placeholder='source'><input id='dst' placeholder='target'><button onclick='migration()'>Erstellen</button><pre id='out5'></pre></div>
 <div class='card'><h3>Health</h3><button onclick='health()'>Prüfen</button><pre id='out6'></pre></div>
+<div class='card'><h3>Live Status Stream</h3><input id='liveToken' placeholder='NISCORE_LIVE_TOKEN'><button onclick='connectLive()'>Verbinden</button><pre id='out7'></pre></div>
 </div></div>
 <script>
 async function post(url, body, out){ const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); document.getElementById(out).textContent=await r.text(); }
@@ -30,5 +31,21 @@ function diagnostic(){ post('/api/v1/diagnostics/results',{asset_id:d_asset.valu
 function wipe(){ post('/api/v1/wipe/jobs',{asset_id:w_asset.value,method:method.value,standard:std.value},'out3'); }
 function iso(){ post('/api/v1/workshop/iso/build',{profile:profile.value,base_distribution:'debian-trixie',include_tools:['smartmontools','nvme-cli']},'out4'); }
 function migration(){ post('/api/v1/migrations/jobs',{tenant_id:tenant.value,job_type:jtype.value,source:src.value,target:dst.value},'out5'); }
+
+let liveSocket;
+function connectLive(){
+  if(liveSocket){ liveSocket.close(); }
+  const token = document.getElementById('liveToken').value;
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  liveSocket = new WebSocket(`${proto}://${location.host}/ws/live/status?token=${encodeURIComponent(token)}`);
+  liveSocket.onopen = () => { document.getElementById('out7').textContent = 'Live-Verbindung aktiv'; };
+  liveSocket.onmessage = (evt) => {
+    const prev = document.getElementById('out7').textContent;
+    document.getElementById('out7').textContent = `${evt.data}
+${prev}`.trim();
+  };
+  liveSocket.onclose = () => { document.getElementById('out7').textContent = 'Live-Verbindung beendet'; };
+}
+
 </script></body></html>
 """)

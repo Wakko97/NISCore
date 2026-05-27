@@ -124,3 +124,12 @@ class NdeskUserUpdateRequest(BaseModel):
     display_name: str | None = None
     role: str | None = None
     active: bool | None = None
+
+
+class LiveStatusEventRequest(BaseModel):
+    asset_id: str
+    source: str
+    stage: str
+    status: str
+    progress_percent: int = 0
+    details: str = ""

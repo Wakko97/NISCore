@@ -51,6 +51,9 @@ uvicorn app.main:app --reload
 - `POST /api/v1/mobile/assessments`
 - `POST /api/v1/workshop/iso/build`
 - `POST /api/v1/integrations/github/ssh-key`
+- `POST /api/v1/live/status` (gesichert via `X-Live-Token`)
+- `GET /api/v1/live/status` (gesichert via `X-Live-Token`)
+- `WS /ws/live/status?token=...` (Live Push für Browser/App)
 
 ## Hinweis
 
@@ -72,3 +75,14 @@ Neue Endpunkte:
 - `GET /api/v1/integrations/ndesk/users`
 - `POST /api/v1/integrations/ndesk/users`
 - `PATCH /api/v1/integrations/ndesk/users/{user_id}`
+
+
+## Live-Status Absicherung
+
+Für Live-Status Push/Stream muss ein gemeinsames Secret gesetzt sein:
+
+```bash
+export NISCORE_LIVE_TOKEN="<starkes-zufallssecret>"
+```
+
+Nur Requests mit korrektem `X-Live-Token` (REST) bzw. `token` Query-Parameter (WebSocket) werden akzeptiert.
