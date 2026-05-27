@@ -1,6 +1,12 @@
 from pydantic import BaseModel
 
 
+class LoginRequest(BaseModel):
+    username: str
+    role: str
+    password: str
+
+
 class ClientRegisterRequest(BaseModel):
     tenant_id: str = "default"
     asset_id: str

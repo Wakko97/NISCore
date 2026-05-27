@@ -49,6 +49,7 @@ from app.schemas import (
     NdeskUserRequest,
     NdeskUserUpdateRequest,
     LiveStatusEventRequest,
+    LoginRequest,
 )
 from app.services import (
     NdeskClientError,
@@ -191,15 +192,15 @@ def health() -> dict:
 
 
 @app.post("/api/v1/auth/login")
-def login(username: str, role: str, password: str) -> dict:
-    if role not in {"admin", "operator", "viewer"}:
+def login(payload: LoginRequest) -> dict:
+    if payload.role not in {"admin", "operator", "viewer"}:
         raise HTTPException(status_code=400, detail="invalid role")
     if not settings.api_token:
         raise HTTPException(status_code=503, detail="auth credentials not configured")
-    if not secure_equals(password, settings.api_token):
+    if not secure_equals(payload.password, settings.api_token):
         raise HTTPException(status_code=401, detail="invalid credentials")
-    token = issue_token(username=username, role=role, ttl_minutes=120)
-    return {"access_token": token, "token_type": "bearer", "role": role}
+    token = issue_token(username=payload.username, role=payload.role, ttl_minutes=120)
+    return {"access_token": token, "token_type": "bearer", "role": payload.role}
 
 
 @app.get("/api/v1/auth/me")
