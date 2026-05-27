@@ -56,3 +56,21 @@ def test_flow_iso_queue():
     with TestClient(app) as c:
         r = c.post('/api/v1/workshop/iso/build', json={"profile":"workshop","base_distribution":"debian","include_tools":["nvme-cli"]}, headers=token())
         assert r.status_code == 200
+
+
+def test_flow_mission_run():
+    with TestClient(app) as c:
+        payload = {
+            "tenant_id": "default",
+            "asset_id": aid("mission"),
+            "serial_number": "m1",
+            "device_type": "laptop",
+            "technician": "alice",
+            "finding": "smart_critical",
+            "with_wipe": True,
+        }
+        r = c.post('/api/v1/missions/run', json=payload, headers=token())
+        assert r.status_code == 200
+        data = r.json()
+        assert data["recommendation"]["priority"] == "P1"
+        assert data["wipe"]["certificate_id"] > 0

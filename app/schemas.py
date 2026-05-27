@@ -152,3 +152,15 @@ class StorageWipeRequest(BaseModel):
     serial_number: str
     method: str = "nvme-format"
     standard: str = "nist-800-88"
+
+
+class MissionRunRequest(BaseModel):
+    tenant_id: str = "default"
+    asset_id: str
+    serial_number: str
+    device_type: str
+    technician: str
+    finding: str
+    with_wipe: bool = True
+    wipe_method: str = "nvme-format"
+    wipe_standard: str = "nist-800-88"
