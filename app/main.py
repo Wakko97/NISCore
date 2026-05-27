@@ -4,6 +4,7 @@ from datetime import datetime
 from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.encoders import jsonable_encoder
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 import os
@@ -604,7 +605,7 @@ async def push_live_status(payload: LiveStatusEventRequest) -> dict:
         session.commit()
         session.refresh(event)
 
-    body = event.model_dump()
+    body = jsonable_encoder(event)
     await live_status_hub.broadcast(body)
     return {"stored": True, "event_id": event.id}
 
