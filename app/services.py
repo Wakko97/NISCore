@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 
 
 def hash_chain(prev_hash: str, body: str, created_at: datetime) -> str:
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
     value = f"{prev_hash}|{body}|{created_at.astimezone(timezone.utc).isoformat()}"
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
