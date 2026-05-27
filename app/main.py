@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime
 from datetime import datetime, timezone
 
-from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
-from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 import os
 from pathlib import Path
@@ -52,7 +50,15 @@ from app.schemas import (
     NdeskUserUpdateRequest,
     LiveStatusEventRequest,
 )
-from app.services import NdeskClientError, hash_chain, ndesk_request, recommend_for_finding, secure_equals, sign_like, ssl_days_until_expiry
+from app.services import (
+    NdeskClientError,
+    hash_chain,
+    ndesk_request,
+    recommend_for_finding,
+    secure_equals,
+    sign_like,
+    ssl_days_until_expiry,
+)
 from app.frontend import admin_html
 from app.jobs import enqueue, get_job, jobs
 from app.observability import logger, request_logging_middleware
