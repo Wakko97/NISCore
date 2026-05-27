@@ -165,6 +165,15 @@ class NdeskUserUpdateRequest(BaseModel):
     active: bool | None = None
 
 
+class NdeskTicketEventRequest(BaseModel):
+    ticket_id: str
+    status: str
+    run_id: int | None = None
+    external_updated_at: str | None = None
+    actor: str = "ndesk-webhook"
+    note: str = ""
+
+
 class LiveStatusEventRequest(BaseModel):
     asset_id: str
     source: str
@@ -203,6 +212,12 @@ class AgentEnrollRequest(BaseModel):
     token: str
     platform: str = "windows"
     mode: Literal["agent", "bootstick"] = "agent"
+
+
+class AgentHeartbeatRequest(BaseModel):
+    status: Literal["online", "degraded", "offline"] = "online"
+    lease_seconds: int = 120
+    details: str = ""
 
 
 class OperationModuleRunRequest(BaseModel):
