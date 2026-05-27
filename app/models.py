@@ -46,6 +46,25 @@ class WipeRun(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class WipeExecutionJob(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    asset_id: int = Field(index=True)
+    target_serial: str
+    storage_type: str = "nvme"
+    execution_mode: str = "agent"
+    standard_profile: str = "nist-800-88"
+    status: str = "pending_approval"
+    created_by: str
+    approved_by: Optional[str] = None
+    approval_note: str = ""
+    rejected_by: Optional[str] = None
+    rejection_note: str = ""
+    canceled_by: Optional[str] = None
+    cancel_note: str = ""
+    device_fingerprint: str = ""
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class Certificate(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     wipe_run_id: int = Field(index=True)

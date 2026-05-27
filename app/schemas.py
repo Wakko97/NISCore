@@ -1,4 +1,5 @@
 from pydantic import BaseModel
+from typing import Literal
 
 
 class LoginRequest(BaseModel):
@@ -31,6 +32,36 @@ class WipeJobRequest(BaseModel):
     asset_id: str
     method: str
     standard: str
+
+
+class WipeExecutionJobRequest(BaseModel):
+    asset_id: str
+    serial_number: str
+    storage_type: Literal["hdd", "ssd", "nvme"] = "nvme"
+    execution_mode: Literal["agent", "boot"] = "agent"
+    standard_profile: Literal["nist-800-88", "ata-secure-erase", "nvme-sanitize"] = "nist-800-88"
+    created_by: str
+
+
+class WipeExecutionApprovalRequest(BaseModel):
+    approved_by: str
+    approval_note: str = ""
+
+
+class WipeExecutionRejectRequest(BaseModel):
+    rejected_by: str
+    rejection_note: str
+
+
+class WipeExecutionCancelRequest(BaseModel):
+    canceled_by: str
+    cancel_note: str = ""
+
+
+class WipeAgentBuildRequest(BaseModel):
+    execution_job_id: int
+    os_target: Literal["linux", "windows"] = "linux"
+    output_format: Literal["dir", "tar.gz", "zip"] = "tar.gz"
 
 
 class WebhookTestRequest(BaseModel):
