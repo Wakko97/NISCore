@@ -103,6 +103,8 @@ class ISOBuildRequest(BaseModel):
     profile: str = "workshop"
     base_distribution: str = "debian-trixie"
     include_tools: list[str] = ["smartmontools", "nvme-cli", "dmidecode", "lshw"]
+    controller_url: str = "http://127.0.0.1:8000"
+    auto_connect: bool = True
 
 
 class GitHubSSHKeyRequest(BaseModel):
@@ -139,3 +141,14 @@ class LiveStatusEventRequest(BaseModel):
     status: str
     progress_percent: int = 0
     details: str = ""
+
+
+class StorageDetectRequest(BaseModel):
+    asset_id: str
+
+
+class StorageWipeRequest(BaseModel):
+    asset_id: str
+    serial_number: str
+    method: str = "nvme-format"
+    standard: str = "nist-800-88"

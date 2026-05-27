@@ -24,6 +24,7 @@ from app.models import (
     MobileDevice,
     MobileReport,
     Recommendation,
+    StorageDevice,
     SFTPEndpoint,
     WebScan,
     WipeRun,
@@ -49,6 +50,8 @@ from app.schemas import (
     NdeskUserRequest,
     NdeskUserUpdateRequest,
     LiveStatusEventRequest,
+    StorageDetectRequest,
+    StorageWipeRequest,
     LoginRequest,
 )
 from app.services import (
@@ -56,6 +59,8 @@ from app.services import (
     hash_chain,
     ndesk_request,
     recommend_for_finding,
+    detect_storage_devices,
+    build_device_fingerprint,
     secure_equals,
     sign_like,
     ssl_days_until_expiry,
@@ -301,6 +306,71 @@ def upload_diagnostics(payload: DiagnosticResultRequest) -> dict:
     return {"diagnostic_run_id": run.id, "recommendation_id": rec.id}
 
 
+
+
+@app.post("/api/v1/storage/detect", dependencies=[Depends(require_role("admin", "operator"))])
+def detect_storage(payload: StorageDetectRequest) -> dict:
+    with get_session() as session:
+        asset = session.exec(select(Asset).where(Asset.asset_id == payload.asset_id)).first()
+        if not asset:
+            raise HTTPException(status_code=404, detail="asset not found")
+
+        devices = detect_storage_devices(asset.asset_id, asset.serial_number, asset.device_type)
+        stored: list[dict] = []
+        for device in devices:
+            row = StorageDevice(asset_id=asset.id, **device)
+            session.add(row)
+            session.flush()
+            stored.append({"id": row.id, **device})
+
+        _append_audit(session, "technician", "storage_detect", payload.model_dump_json())
+        session.commit()
+    return {"asset_id": payload.asset_id, "detected": stored}
+
+
+@app.get("/api/v1/storage/devices/{asset_id}", dependencies=[Depends(require_role("admin", "operator", "viewer"))])
+def list_storage_devices(asset_id: str) -> dict:
+    with get_session() as session:
+        asset = session.exec(select(Asset).where(Asset.asset_id == asset_id)).first()
+        if not asset:
+            raise HTTPException(status_code=404, detail="asset not found")
+        devices = session.exec(select(StorageDevice).where(StorageDevice.asset_id == asset.id).order_by(StorageDevice.id.desc())).all()
+    return {"asset_id": asset_id, "devices": [d.model_dump() for d in devices]}
+
+
+@app.post("/api/v1/storage/wipe", dependencies=[Depends(require_role("admin", "operator"))])
+def wipe_storage_device(payload: StorageWipeRequest) -> dict:
+    with get_session() as session:
+        asset = session.exec(select(Asset).where(Asset.asset_id == payload.asset_id)).first()
+        if not asset:
+            raise HTTPException(status_code=404, detail="asset not found")
+
+        disk = session.exec(select(StorageDevice).where(StorageDevice.asset_id == asset.id, StorageDevice.serial_number == payload.serial_number)).first()
+        if not disk:
+            raise HTTPException(status_code=404, detail="storage device not found")
+
+        command_log = f"wipe --method {payload.method} --standard {payload.standard} --serial {payload.serial_number}"
+        run = WipeRun(
+            asset_id=asset.id,
+            method=payload.method,
+            standard=payload.standard,
+            status="completed",
+            command_log=command_log,
+            device_fingerprint=build_device_fingerprint(payload.asset_id, payload.serial_number, payload.method, payload.standard),
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        sha, signature = sign_like(f"{payload.asset_id}:{payload.serial_number}:{run.id}:{command_log}")
+        cert = Certificate(wipe_run_id=run.id, sha256=sha, signature=signature, pdf_path=f"/certs/wipe_{run.id}.pdf")
+        session.add(cert)
+        _append_audit(session, "technician", "storage_wipe", payload.model_dump_json())
+        session.commit()
+        session.refresh(cert)
+
+    return {"wipe_run_id": run.id, "certificate_id": cert.id, "sha256": cert.sha256}
+
 @app.post("/api/v1/wipe/jobs", dependencies=[Depends(require_role("admin", "operator"))])
 def create_wipe_job(payload: WipeJobRequest) -> dict:
     with get_session() as session:
@@ -480,20 +550,65 @@ def _build_workshop_iso_task(payload: ISOBuildRequest) -> dict:
     file_name = f"niscore-{safe_profile}.iso"
     iso_path = iso_dir / file_name
     manifest = iso_dir / f"{safe_profile}.manifest.txt"
+    toolkit_dir = iso_dir / f"{safe_profile}_usb_toolkit"
+    toolkit_dir.mkdir(parents=True, exist_ok=True)
+
+    connect_script = toolkit_dir / "connect_and_report.sh"
+    connect_script.write_text(
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+CONTROLLER_URL="{payload.controller_url.rstrip('/')}"
+LIVE_TOKEN=${{NISCORE_LIVE_TOKEN:-}}
+ASSET_ID=${{1:-unknown-asset}}
+if [[ -z "${{LIVE_TOKEN}}" ]]; then
+  echo 'NISCORE_LIVE_TOKEN fehlt' >&2
+  exit 1
+fi
+HOSTNAME=$(hostname)
+curl -fsS -X POST "${{CONTROLLER_URL}}/api/v1/live/status" \
+  -H "X-Live-Token: ${{LIVE_TOKEN}}" \
+  -H 'Content-Type: application/json' \
+  -d "{{\"asset_id\":\"${{ASSET_ID}}\",\"source\":\"usb-toolkit\",\"stage\":\"boot\",\"status\":\"running\",\"progress_percent\":10,\"details\":\"host=${{HOSTNAME}}\"}}"
+echo 'Status gemeldet.'
+"""
+    )
+    connect_script.chmod(0o755)
+
+    readme = toolkit_dir / "README.txt"
+    readme.write_text(
+        "NISCore USB Toolkit\n"
+        "1) Live-System booten\n"
+        "2) NISCORE_LIVE_TOKEN setzen\n"
+        "3) ./connect_and_report.sh <asset-id> ausführen\n"
+        "4) Optional: lokale Diagnose-/Wipe-Tools ergänzen\n"
+    )
+
     manifest.write_text(
         "\n".join(
             [
                 f"profile={payload.profile}",
                 f"base_distribution={payload.base_distribution}",
                 f"include_tools={','.join(payload.include_tools)}",
+                f"controller_url={payload.controller_url}",
+                f"auto_connect={payload.auto_connect}",
+                f"toolkit_path={toolkit_dir}",
+                "mode=mvp-usb-toolkit",
             ]
         )
     )
+
     iso_path.write_bytes(b"NISCORE-ISO-PLACEHOLDER")
+
     with get_session() as session:
         _append_audit(session, "system", "iso_build", payload.model_dump_json())
         session.commit()
-    return {"status": "created", "iso_path": str(iso_path), "manifest_path": str(manifest)}
+    return {
+        "status": "created",
+        "iso_path": str(iso_path),
+        "manifest_path": str(manifest),
+        "toolkit_path": str(toolkit_dir),
+        "connect_script": str(connect_script),
+    }
 
 
 @app.post("/api/v1/integrations/github/ssh-key", dependencies=[Depends(require_role("admin", "operator"))])

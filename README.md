@@ -14,7 +14,7 @@ Dieses Repository enthält eine **MVP+ Referenzimplementierung** der in `OPSCORE
 - **LF70 KI-Assistenz:** lokaler Assistenz-Endpoint (Ollama-konformer Betriebsmodus, Human-in-the-loop)
 - **LF80 Migration Suite:** Migrationsjobs + SFTP-Endpoint-Verwaltung
 - **LF90 Mobile Diagnostics:** Mobile Device Inventur, Assessment und signierter Report-Metadatenfluss
-- **Werkstatt ISO-Baustein:** ISO-Build-Endpoint mit Artefakt/Manifest-Erzeugung als Pipeline-Grundgerüst
+- **Werkstatt ISO-Baustein:** ISO-Build-Endpoint mit Artefakt/Manifest + USB-Toolkit (connect Script) als Pipeline-Grundgerüst
 - **GitHub Private Repo Integration:** SSH-Key-Hinterlegung für `git@github.com` Workflows
 
 ## Start
@@ -36,6 +36,9 @@ uvicorn app.main:app --reload
 - `GET /api/v1/audit/events?limit=100`
 - `PATCH /api/v1/clients/{asset_id}`
 - `POST /api/v1/diagnostics/results`
+- `POST /api/v1/storage/detect`
+- `GET /api/v1/storage/devices/{asset_id}`
+- `POST /api/v1/storage/wipe`
 - `POST /api/v1/wipe/jobs`
 - `GET /api/v1/wipe/certificates/{certificate_id}`
 - `POST /api/v1/webhooks/test`
