@@ -52,7 +52,7 @@ pre{white-space:pre-wrap;background:var(--panel2);padding:10px;border-radius:10p
         <div class='small'>Schnellaktionen + Live-Antworten aus der API</div>
       </div>
       <div class='token'>
-        <span class='badge'>X-API-Token</span>
+        <span class='badge'>API/Bearer Token</span>
         <input id='apiToken' placeholder='optional, wenn NISCORE_API_TOKEN aktiv ist'/>
       </div>
     </div>
@@ -122,6 +122,8 @@ pre{white-space:pre-wrap;background:var(--panel2);padding:10px;border-radius:10p
   </main>
 </div>
 <script>
+function headers(){ const h={"Content-Type":"application/json"}; const t=document.getElementById('apiToken').value.trim(); if(t){h['Authorization']=`Bearer ${t}`; h['X-API-Token']=t;} return h; }
+async function render(resId, promise){ const el=document.getElementById(resId); try{const r=await promise; const body=await r.text(); el.textContent=`${r.status} ${r.statusText}\n${body}`;}catch(e){el.textContent='Request error: '+e;} }
 function headers(){ const h={"Content-Type":"application/json"}; const t=document.getElementById('apiToken').value.trim(); if(t){h['X-API-Token']=t;} return h; }
 async function render(resId, promise){ const el=document.getElementById(resId); try{const r=await promise; const body=await r.text(); el.textContent=`${r.status} ${r.statusText}\\n${body}`;}catch(e){el.textContent='Request error: '+e;} }
 function post(url, body, out){ return render(out, fetch(url,{method:'POST',headers:headers(),body:JSON.stringify(body)})); }
