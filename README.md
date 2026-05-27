@@ -62,6 +62,14 @@ uvicorn app.main:app --reload
 - `POST /api/v1/mobile/assessments`
 - `POST /api/v1/workshop/iso/build`
 - `POST /api/v1/integrations/github/ssh-key`
+- `POST /api/v1/agents/enroll` (Agent/Bootstick Token-Enrollment)
+- `POST /api/v1/modules/run` (Modul-Run starten: migration, wipe, hardware, seo, pentest, backup, mobile)
+- `POST /api/v1/modules/{run_id}/control` (Pause/Resume/Cancel/Approve/Reject)
+- `POST /api/v1/modules/{run_id}/progress` (Fortschritt/Event durch Agent/Operator melden)
+- `GET /api/v1/modules/runs` (Filter: `module`, `status`, Pagination)
+- `POST /api/v1/modules/{run_id}/tickets/link` (NDesk Ticket einem Vorgang zuordnen)
+- `GET /api/v1/modules/{run_id}/tickets` (Ticket-Zuordnungen pro Vorgang)
+- `POST /api/v1/modules/offline/bundle` (Offline-Bootstick Bundle für Vorgang erzeugen)
 - `POST /api/v1/live/status` (gesichert via `X-Live-Token`)
 - `GET /api/v1/live/status` (gesichert via `X-Live-Token`)
 - `WS /ws/live/status?token=...` (Live Push für Browser/App)
@@ -100,6 +108,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 - **Auth/RBAC:** Bearer-Token Login (`/api/v1/auth/login`) + Rollen (`admin`, `operator`, `viewer`) für geschützte Endpunkte.
 - **Postgres + Alembic:** `NISCORE_DATABASE_URL` auf Postgres-Beispiel und Alembic-Basisstruktur (`alembic/`, `alembic.ini`).
+- **Postgres + Alembic:** `NISCORE_DATABASE_URL` auf Postgres-Beispiel und Alembic-Basisstruktur (`alembic/`, `alembic.ini`) inkl. Modul-Orchestrierungstabellen (`0003`).
 - **CI:** GitHub Actions Workflow mit `ruff`, `bandit`, `pytest`, `compileall`.
 - **Job Queue:** In-Process Queue (`app/jobs.py`) + Job-Status-Endpoint (`/api/v1/jobs/{job_id}`) für lange Tasks.
 - **Monitoring:** `/metrics` Endpoint plus Request-Logs.
@@ -123,6 +132,8 @@ Neue Endpunkte:
 - `GET /api/v1/integrations/ndesk/users`
 - `POST /api/v1/integrations/ndesk/users`
 - `PATCH /api/v1/integrations/ndesk/users/{user_id}`
+- `POST /api/v1/integrations/ndesk/staff-sync`
+- `GET /api/v1/integrations/ndesk/tickets` (Ticket-Pull/Abgleich)
 
 
 ## Live-Status Absicherung

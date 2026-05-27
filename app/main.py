@@ -17,6 +17,9 @@ from app.config import settings
 from app.db import get_session, init_db
 from app.models import (
     LiveStatusEvent,
+    AgentSession,
+    OperationRun,
+    OperationTicketLink,
     Alert,
     Asset,
     AuditEvent,
@@ -63,6 +66,11 @@ from app.schemas import (
     StorageWipeRequest,
     LoginRequest,
     MissionRunRequest,
+    AgentEnrollRequest,
+    OperationModuleRunRequest,
+    OperationControlRequest,
+    OperationTicketLinkRequest,
+    OfflineBundleRequest,
 )
 from app.services import (
     NdeskClientError,
@@ -117,6 +125,15 @@ class LiveStatusHub:
 
 
 live_status_hub = LiveStatusHub()
+MODULE_BLUEPRINTS = {
+    "migration": {"stages": ["discovery", "mapping", "copy", "delta", "validation"], "default_progress": 10},
+    "wipe": {"stages": ["detect", "approval", "dispatch", "wipe", "certificate"], "default_progress": 15},
+    "hardware": {"stages": ["inventory", "diagnostics", "report"], "default_progress": 20},
+    "seo": {"stages": ["crawl", "analyze", "report"], "default_progress": 15},
+    "pentest": {"stages": ["scope", "recon", "verify", "report"], "default_progress": 10},
+    "backup": {"stages": ["snapshot", "transfer", "verify"], "default_progress": 10},
+    "mobile": {"stages": ["inventory", "assessment", "recommendation"], "default_progress": 20},
+}
 
 
 def _require_live_token(x_live_token: str | None = Header(default=None)) -> None:
@@ -256,6 +273,196 @@ def list_audit_events(limit: int = 100) -> list[dict]:
     with get_session() as session:
         events = session.exec(select(AuditEvent).order_by(AuditEvent.id.desc()).limit(limit)).all()
     return [e.model_dump() for e in events]
+
+
+@app.post("/api/v1/agents/enroll", dependencies=[Depends(require_role("admin", "operator"))])
+def enroll_agent(payload: AgentEnrollRequest) -> dict:
+    expected = os.getenv("NISCORE_API_TOKEN", "").strip()
+    if not expected or not secure_equals(payload.token, expected):
+        raise HTTPException(status_code=401, detail="invalid enrollment token")
+    with get_session() as session:
+        current = session.exec(select(AgentSession).where(AgentSession.agent_id == payload.agent_id)).first()
+        if current:
+            current.asset_id = payload.asset_id
+            current.platform = payload.platform
+            current.mode = payload.mode
+            current.status = "online"
+            current.last_seen_at = datetime.utcnow()
+            agent = current
+        else:
+            agent = AgentSession(
+                agent_id=payload.agent_id,
+                asset_id=payload.asset_id,
+                platform=payload.platform,
+                mode=payload.mode,
+            )
+        session.add(agent)
+        _append_audit(session, "agent", "agent_enroll", payload.model_dump_json())
+        session.commit()
+        session.refresh(agent)
+    return {"agent_session_id": agent.id, "agent_id": agent.agent_id, "status": agent.status}
+
+
+@app.post("/api/v1/modules/run", dependencies=[Depends(require_role("admin", "operator"))])
+def run_module(payload: OperationModuleRunRequest) -> dict:
+    blueprint = MODULE_BLUEPRINTS[payload.module]
+    with get_session() as session:
+        run = OperationRun(
+            module=payload.module,
+            tenant_id=payload.tenant_id,
+            asset_id=payload.asset_id,
+            operator=payload.operator,
+            status="running",
+            progress_percent=blueprint["default_progress"],
+            parameters_json=json.dumps({"stages": blueprint["stages"], **payload.parameters}),
+        )
+        session.add(run)
+        session.flush()
+        session.add(
+            LiveStatusEvent(
+                asset_id=payload.asset_id,
+                source=f"module:{payload.module}",
+                stage=blueprint["stages"][0],
+                status="running",
+                progress_percent=run.progress_percent,
+                details=f"module {payload.module} started with stage {blueprint['stages'][0]}",
+            )
+        )
+        _append_audit(session, payload.operator, "module_run_create", payload.model_dump_json())
+        session.commit()
+        session.refresh(run)
+    return {"run_id": run.id, "module": run.module, "status": run.status, "progress_percent": run.progress_percent}
+
+
+@app.get("/api/v1/modules/runs", dependencies=[Depends(require_role("admin", "operator", "viewer"))])
+def list_module_runs(limit: int = 50, offset: int = 0, module: str | None = None, status: str | None = None) -> list[dict]:
+    limit = 1 if limit < 1 else min(limit, 500)
+    offset = 0 if offset < 0 else offset
+    with get_session() as session:
+        query = select(OperationRun).order_by(OperationRun.id.desc())
+        if module:
+            query = query.where(OperationRun.module == module)
+        if status:
+            query = query.where(OperationRun.status == status)
+        rows = session.exec(query.offset(offset).limit(limit)).all()
+    return [r.model_dump() for r in rows]
+
+
+@app.post("/api/v1/modules/{run_id}/progress", dependencies=[Depends(require_role("admin", "operator"))])
+def update_module_progress(run_id: int, payload: LiveStatusEventRequest) -> dict:
+    safe_progress = max(0, min(100, payload.progress_percent))
+    with get_session() as session:
+        run = session.get(OperationRun, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="operation run not found")
+        if run.asset_id != payload.asset_id:
+            raise HTTPException(status_code=400, detail="asset mismatch for operation run")
+        run.progress_percent = safe_progress
+        if safe_progress >= 100 and payload.status == "completed":
+            run.status = "completed"
+            run.result_json = json.dumps({"stage": payload.stage, "details": payload.details})
+        session.add(run)
+        event = LiveStatusEvent(
+            asset_id=payload.asset_id,
+            source=f"module:{run.module}",
+            stage=payload.stage,
+            status=payload.status,
+            progress_percent=safe_progress,
+            details=payload.details,
+        )
+        session.add(event)
+        _append_audit(session, payload.source, "module_run_progress", f"{run_id}:{payload.model_dump_json()}")
+        session.commit()
+        session.refresh(run)
+        session.refresh(event)
+    return {"run_id": run.id, "status": run.status, "progress_percent": run.progress_percent, "event_id": event.id}
+
+
+@app.post("/api/v1/modules/{run_id}/control", dependencies=[Depends(require_role("admin", "operator"))])
+def control_module_run(run_id: int, payload: OperationControlRequest) -> dict:
+    status_map = {"pause": "paused", "resume": "running", "cancel": "canceled", "approve": "approved", "reject": "rejected"}
+    with get_session() as session:
+        run = session.get(OperationRun, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="operation run not found")
+        run.status = status_map[payload.action]
+        session.add(run)
+        session.add(
+            LiveStatusEvent(
+                asset_id=run.asset_id,
+                source=f"module:{run.module}",
+                stage="control",
+                status=run.status,
+                progress_percent=run.progress_percent,
+                details=f"{payload.action} by {payload.actor}: {payload.note}",
+            )
+        )
+        _append_audit(session, payload.actor, "module_run_control", f"{run_id}:{payload.model_dump_json()}")
+        session.commit()
+        session.refresh(run)
+    return run.model_dump()
+
+
+@app.post("/api/v1/modules/{run_id}/tickets/link", dependencies=[Depends(require_role("admin", "operator"))])
+def link_module_ticket(run_id: int, payload: OperationTicketLinkRequest) -> dict:
+    with get_session() as session:
+        run = session.get(OperationRun, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="operation run not found")
+        existing = session.exec(
+            select(OperationTicketLink).where(
+                OperationTicketLink.operation_run_id == run_id,
+                OperationTicketLink.ndesk_ticket_id == payload.ticket_id,
+            )
+        ).first()
+        if existing:
+            return {"linked": True, "link_id": existing.id, "operation_run_id": run_id, "ticket_id": payload.ticket_id}
+        link = OperationTicketLink(
+            operation_run_id=run_id,
+            ndesk_ticket_id=payload.ticket_id,
+            relation=payload.relation,
+        )
+        session.add(link)
+        _append_audit(session, payload.actor, "module_ticket_link", f"{run_id}:{payload.model_dump_json()}")
+        session.commit()
+        session.refresh(link)
+    return {"linked": True, "link_id": link.id, "operation_run_id": run_id, "ticket_id": payload.ticket_id}
+
+
+@app.get("/api/v1/modules/{run_id}/tickets", dependencies=[Depends(require_role("admin", "operator", "viewer"))])
+def list_module_tickets(run_id: int) -> list[dict]:
+    with get_session() as session:
+        rows = session.exec(select(OperationTicketLink).where(OperationTicketLink.operation_run_id == run_id)).all()
+    return [r.model_dump() for r in rows]
+
+
+@app.post("/api/v1/modules/offline/bundle", dependencies=[Depends(require_role("admin", "operator"))])
+def build_offline_bundle(payload: OfflineBundleRequest) -> dict:
+    with get_session() as session:
+        run = session.get(OperationRun, payload.run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="operation run not found")
+        bundle_dir = Path("./artifacts/offline-bundles")
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        out_file = bundle_dir / f"offline-run-{run.id}.json"
+        out_file.write_text(
+            json.dumps(
+                {
+                    "run_id": run.id,
+                    "module": run.module,
+                    "asset_id": run.asset_id,
+                    "profile": payload.profile,
+                    "include_tasks": payload.include_tasks,
+                    "parameters": json.loads(run.parameters_json),
+                    "generated_at": datetime.utcnow().isoformat(),
+                },
+                indent=2,
+            )
+        )
+        _append_audit(session, payload.created_by, "offline_bundle_build", f"run_id={run.id};file={out_file}")
+        session.commit()
+        run_id = run.id
+    return {"created": True, "run_id": run_id, "bundle_path": str(out_file)}
 
 
 def _create_recommendation(session, finding_type: str, details: str) -> Recommendation:
@@ -994,6 +1201,32 @@ def ndesk_update_user(user_id: str, payload: NdeskUserUpdateRequest) -> dict:
         _append_audit(session, "ndesk", "user_update", f"{user_id}:{updates}")
         session.commit()
     return {"source": "ndesk", "user": updated}
+
+
+@app.post("/api/v1/integrations/ndesk/staff-sync")
+def ndesk_staff_sync(limit: int = 100) -> dict:
+    safe_limit = 1 if limit < 1 else min(limit, 1000)
+    try:
+        users = ndesk_request("GET", "/api/users", params={"limit": safe_limit})
+    except NdeskClientError as exc:
+        raise HTTPException(status_code=502, detail=f"ndesk error: {exc}") from exc
+    with get_session() as session:
+        _append_audit(session, "ndesk", "staff_sync", f"count={len(users) if isinstance(users, list) else 'unknown'}")
+        session.commit()
+    return {"source": "ndesk", "synced": users}
+
+
+@app.get("/api/v1/integrations/ndesk/tickets")
+def ndesk_list_tickets(limit: int = 100) -> dict:
+    safe_limit = 1 if limit < 1 else min(limit, 1000)
+    try:
+        tickets = ndesk_request("GET", "/api/tickets", params={"limit": safe_limit})
+    except NdeskClientError as exc:
+        raise HTTPException(status_code=502, detail=f"ndesk error: {exc}") from exc
+    with get_session() as session:
+        _append_audit(session, "ndesk", "ticket_sync_pull", f"count={len(tickets) if isinstance(tickets, list) else 'unknown'}")
+        session.commit()
+    return {"source": "ndesk", "tickets": tickets}
 
 
 @app.post("/api/v1/live/status", dependencies=[Depends(_require_live_token)])
